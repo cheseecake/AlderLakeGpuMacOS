@@ -146,11 +146,9 @@ SRC = MyIntelGPU.cpp IntelFramebuffer.cpp MyIntelFramebuffer.cpp \
       MyIntelAccelerator.cpp MyIntelMedia.cpp \
       MyIntelRing.cpp MyIntelGEMBuffer.cpp MyIntelGPUClient.cpp \
       MyIntelVCSCommand.cpp MyIntelVCSClient.cpp \
-      MyIntelEDIDParser.cpp
 OBJ = MyIntelGPU.o IntelFramebuffer.o MyIntelFramebuffer.o MyIntelMedia.o \
       MyIntelAccelerator.o MyIntelRing.o MyIntelGEMBuffer.o MyIntelGPUClient.o \
       MyIntelVCSCommand.o MyIntelVCSClient.o \
-      MyIntelEDIDParser.o
 
 .PHONY: all clean install load unload lint format version strip_binary tools FORCE
 
@@ -224,7 +222,6 @@ format:
 	  MyIntelAccelerator.cpp MyIntelAccelerator.hpp \
 	  MyIntelRing.cpp MyIntelRing.hpp \
 	  MyIntelGEMBuffer.cpp MyIntelGEMBuffer.hpp \
-	  MyIntelEDIDParser.cpp MyIntelEDIDParser.hpp 2>&1 || echo "Warning: clang-format not installed — skipping"
 
 # ─── Binary Stripping ─────────────────────────────────────────────
 strip_binary:
