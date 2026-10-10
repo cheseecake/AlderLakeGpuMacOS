@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://apple.com">
 <plist version="1.0">
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
@@ -41,9 +41,9 @@
 			AAAAAA==
 			</data>
 			<key>Universal_AutoMatch_MetalStatistics</key>
-			<string>Intel (R) Iris (R) Xe Graphics</string>
+			<string>Intel(R) Graphics (Raptor Lake Refresh)</string>
 			<key>model</key>
-			<string>Intel Iris Xe 80EU</string>
+			<string>Intel Graphics (Core 5 120U - 80EU)</string>
 		</dict>
 	</dict>
 	<key>MinKernel</key>
