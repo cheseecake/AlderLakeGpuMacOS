@@ -61,21 +61,15 @@
     <string>Copyright © 2026 pongpan-bk. All rights reserved.</string>
 
     <key>OSBundleLibraries</key>
-    <dict>
-        <key>com.apple.iokit.IOGraphicsFamily</key>
-        <string>597</string>
-        <key>com.apple.iokit.IOPCIFamily</key>
-        <string>2.9</string>
-        <key>com.apple.kpi.bsd</key>
-        <string>22.6.6</string>
-        <key>com.apple.kpi.iokit</key>
-        <string>22.6.6</string>
-        <key>com.apple.kpi.libkern</key>
-        <string>22.6.6</string>
-        <key>com.apple.kpi.mach</key>
-        <string>22.6.6</string>
-        <key>com.apple.kpi.unsupported</key>
-        <string>22.6.6</string>
-    </dict>
+<dict>
+    <key>as.vit9696.Lilu</key>
+    <string>1.6.7</string>
+    <key>com.apple.kpi.iokit</key>
+    <string>22.6.0</string>
+    <key>com.apple.kpi.libkern</key>
+    <string>22.6.0</string>
+    <key>com.apple.kpi.mach</key>
+    <string>22.6.0</string>
+</dict>
 </dict>
 </plist>
