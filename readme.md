@@ -12,13 +12,13 @@ Display / IOFramebuffer	⚠️ BIOS/GOP + IONDRVSupport owns the panel. MyIntelF
 RCS / BCS / VCS rings + execlists submission	✅
 PPGTT identity mapping (GEM buffers)	✅
 Media engines (VDBOX/VEBOX detect via 0x138010)	✅
-H.264 hardware decode	⏳ unverified — submission works, ESR=0, but harness shows FAIL-NODATA
+H.264 hardware decode	⏳ Unverified — submission works, ESR=0, but harness shows FAIL-NODATA
 ExecBatch / WaitBatch / RingStatus client API	✅ (v4.0.61)
-Full Metal / VideoToolbox integration	⏳ next
+Full Metal / VideoToolbox integration	⏳ Next
 
 
-⚠️ Hardware decode status — NOT proven
-Harness output shows:
+⚠️ Hardware Decode Status — Not Proven
+Harness output:
 
 Code
 [READBACK] probe=20480 poison(0xA5)=2091 zero=0 other=18389
@@ -26,9 +26,9 @@ Code
 [SRC-COHERENCE] aperture vs CPU: MATCH ✅
 2091 bytes never written → decode target not producing pixels
 
-ESR=0 only means ring retired without error, not that decode succeeded
+ESR=0 → ring retired without error, but no pixel output
 
-[SRC-COHERENCE] MATCH proves memory path is CPU-coherent
+[SRC-COHERENCE] MATCH → memory path CPU-coherent
 
 Re-run harness until poison=0 before claiming decode works.
 
@@ -43,7 +43,7 @@ BUILD_NUMBER must be set manually → prevents drift from commit count
 
 Never run make as root → fix ownership with chown if needed
 
-🚀 Deploy (L/E only — never OpenCore)
+🚀 Deploy (Library/Extensions only — never OpenCore)
 bash
 STAMP=$(date +%Y%m%d-%H%M%S)
 mkdir -p ~/kext-backups/pre-$STAMP
@@ -58,7 +58,7 @@ Check loaded kexts:
 
 bash
 kmutil showloaded | grep -i myintel
-🔍 Post-reboot verification
+🔍 Post-reboot Verification
 bash
 log show --predicate 'sender == "MyIntelGPU"' --last 20m --style syslog
 Expected healthy boot:
@@ -109,3 +109,4 @@ Deploy only to /Library/Extensions
 
 Backup before deploy
 
+Never reboot mid-deploy
