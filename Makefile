@@ -28,7 +28,7 @@ OBJ = $(SRC:.cpp=.o)
 all: $(TARGET).kext/Contents/MacOS/$(TARGET)
 
 %.o: %.cpp
-    $(CXX) $(CXXFLAGS) -c -o $@ $<
+  $(CXX) $(CXXFLAGS) -c -o $@ $<
 
 $(TARGET).kext/Contents/Info.plist: Info.plist
     mkdir -p "$(TARGET).kext/Contents"
