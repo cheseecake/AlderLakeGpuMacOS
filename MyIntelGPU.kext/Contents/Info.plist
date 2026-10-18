@@ -31,7 +31,7 @@
 			<key>IOPCIClassMatch</key>
 			<string>0x03000000&amp;0xFFFF0000</string>
 			<key>IOPCIMatch</key>
-			<string>0xA7AC8086</string>
+			<string>0xA7AC8086 0x46B38086</string>
 			<key>IOProbeScore</key>
 			<integer>100000</integer>
 			<key>IOProviderClass</key>

@@ -467,7 +467,7 @@ uint32_t MyIntelGPU::detectHardwareGeneration(void)
              */
             gen = 12;
             fFakeGen = 9;
-            IODebug("Detected Alder Lake (Gen12) → Faking Coffee Lake (Gen9)");
+            IODebug("Detected Alder Lake (Gen12, dev=0x%04X) → Faking Coffee Lake (Gen9)", fDeviceID);
             break;
 
         case 0x3E:  /* Coffee Lake (0x3E90-0x3E9F) */

@@ -61,6 +61,7 @@ class MyIntelVCSClient;
  */
 
 #define ADL_P_GT2_DEVICE_ID 0x4691 /* Alder Lake-P GT2 () */
+#define ADL_P_I3_1220P_DEVICE_ID 0x46B3 /* Alder Lake-P GT2 (i3-1220P, 64EU) */
 #define CFL_GT2_DEVICE_ID 0x3E92 /* Coffee Lake-U15 GT2 () */
 
 /*

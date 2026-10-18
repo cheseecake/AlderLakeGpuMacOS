@@ -36,9 +36,12 @@
             <key>IOPCIClassMatch</key>
             <string>0x03000000&amp;0xFFFF0000</string>
             <key>IOPCIMatch</key>
-            <string>0xA7AC8086 0xA7AD8086 0xA7AE8086</string>
+            <string>0xA7AC8086 0xA7AD8086 0xA7AE8086 0x46B38086</string>
             <key>IONameMatch</key>
-            <string>pci8086,a7ac</string>
+            <array>
+                <string>pci8086,a7ac</string>
+                <string>pci8086,46b3</string>
+            </array>
             <key>IOProbeScore</key>
             <integer>100000</integer>
             <key>IOProviderClass</key>
