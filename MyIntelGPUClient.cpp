@@ -300,7 +300,7 @@ IOReturn MyIntelGPUClient::externalMethod(uint32_t selector, IOExternalMethodArg
                  * scalarInput[0] = buffer handle
                  * scalarInput[1] = taskType  (optional, default WriteMagic)
                  * scalarInput[2] = packetData (optional, 0 = default magic) */
-                IOLog("MyIntelGPUClient: [RING_SUBMIT] staging handle 0x%llX (GGTT 0x%X) taskType=%u via submitClientTaskViaRing\n",
+                IOLog("[RING_SUBMIT] handle=%llX ggtt=%X type=%u\n",
                       (uint64_t)buf, buf->ggttOffset, taskType);
                 return fProvider->submitClientTaskViaRing(buf, taskType, packetData);
             }

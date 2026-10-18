@@ -217,7 +217,7 @@ MyIntelRing *ringCreate(
     }
 
     if (head_retry <= 0) {
-        RING_DEBUG_RAW("peetalog::[Hardware Error] RING_HEAD write failed to stick! Engine stuck in deep RC6");
+        RING_DEBUG_RAW("RING_HEAD write failed to stick! (deep RC6)");
         if (fwHeld) cb->fwPut(cb->context);
         cb->gemFree(cb->context, gemBuf);
         IOFree(ring, sizeof(MyIntelRing));
@@ -323,10 +323,10 @@ MyIntelRing *ringCreate(
         uint32_t execStatusHi = cb->readReg32(cb->context, base + RING_EXECLIST_STATUS_HI_OFFSET);
         uint32_t sqContents0  = cb->readReg32(cb->context, base + RING_EXECLIST_SQ_CONTENTS_OFFSET);
         uint32_t sqContents1  = cb->readReg32(cb->context, base + RING_EXECLIST_SQ_CONTENTS_OFFSET + 4);
-        RING_DEBUG_RAW("ringCreate: EXECLIST_STATUS_LO=0x%08X HI=0x%08X (active=%u pend=%u load=%u)",
+        RING_DEBUG_RAW("ringCreate: EXECLIST_LO=%X HI=%X act=%u pend=%u load=%u",
                        execStatusLo, execStatusHi,
                        (execStatusLo >> 0) & 1u, (execStatusLo >> 1) & 1u, (execStatusLo >> 2) & 1u);
-        RING_DEBUG_RAW("ringCreate: EXECLIST_SQ_CONTENTS[0]=0x%08X [1]=0x%08X (desc=0x%016llX)",
+        RING_DEBUG_RAW("ringCreate: EXECLIST_SQ[0]=%X [1]=%X desc=%016llX",
                        sqContents0, sqContents1,
                        ((uint64_t)sqContents1 << 32) | sqContents0);
     }
@@ -365,7 +365,7 @@ MyIntelRing *ringCreate(
              * written to the execlist (CTX_RING_CTL | RING_VALID), not by
              * RING_CTL. Log + continue; the submit path checks lrcInited.
              */
-            RING_DEBUG_RAW("ringCreate: RING_CTL_VALID not set via MMIO (expected on Gen12+, execlists mode), continuing");
+            RING_DEBUG_RAW("ringCreate: RING_CTL_VALID unset (Gen12+ execlists), continuing");
         } else {
             RING_TRACE("RING_CTL = 0x%08X (VALID set via MMIO — legacy path active)", ctlValue);
         }
@@ -1244,7 +1244,7 @@ void ringSubmitExeclists(MyIntelRing *ring, MyIntelRingCallbacks *cb)
      * desc=0x0/HEAD=0 (E2 hung-boot signature). Abort the submit and leave
      * the ring stalled rather than program a sleeping engine. */
     if (!fwHeld) {
-        RING_DEBUG_RAW("ringSubmitExeclists: ABORT — forcewake acquire failed; ELSP write would be dropped");
+        RING_DEBUG_RAW("ringSubmit: ABORT forcewake failed");
         return;
     }
 
@@ -1321,7 +1321,7 @@ void ringSubmitExeclists(MyIntelRing *ring, MyIntelRingCallbacks *cb)
         uint32_t ringIpeir = cb->readReg32(cb->context, base + RING_IPEIR_OFFSET);
         uint32_t ringIpehr = cb->readReg32(cb->context, base + RING_IPEHR_OFFSET);
         uint32_t gtFault   = cb->readReg32(cb->context, GEN12_RING_FAULT_REG_OFFSET);
-        RING_DEBUG_RAW("ringSubmitExeclists: HEAD=0x%X TAIL=0x%X EIR=0x%08X ESR=0x%08X IPEIR=0x%08X IPEHR=0x%08X",
+        RING_DEBUG_RAW("ringSubmit: HEAD=%X TAIL=%X EIR=%X ESR=%X IPEIR=%X IPEHR=%X",
                        ringHead & 0xFFFFFFFC, ringTail & 0xFFFFFFFC,
                        ringEir, ringEsr, ringIpeir, ringIpehr);
         RING_DEBUG_RAW("ringSubmitExeclists: FAULT_GEN12=0x%08X%s",

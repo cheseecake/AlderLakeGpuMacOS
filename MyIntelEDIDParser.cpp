@@ -11,8 +11,8 @@
 #define EDIDLog(fmt, ...) \
     IOLog("MyIntelEDID: [%s:%d] " fmt "\n", __FUNCTION__, __LINE__, ##__VA_ARGS__)
 
-#define super IOService
-OSDefineMetaClassAndStructors(MyIntelEDIDParser, IOService)
+#define super OSObject
+OSDefineMetaClassAndStructors(MyIntelEDIDParser, OSObject)
 
 #pragma mark - init / free
 
@@ -97,6 +97,29 @@ bool MyIntelEDIDParser::getModeInfo(UInt32 index, IODisplayModeInformation *info
     }
 
     return modeInfoFromTiming(&fDetailedTimings[index], info);
+}
+
+bool MyIntelEDIDParser::getDetailedTiming(UInt32 index, UInt32 *pixelClock, UInt16 *hActive, UInt16 *hBlank,
+                                          UInt16 *vActive, UInt16 *vBlank, UInt8 *hSyncOffset, UInt8 *hSyncWidth,
+                                          UInt8 *vSyncOffset, UInt8 *vSyncWidth, UInt8 *flags, UInt8 *stereo) const
+{
+    if (index >= fDetailedTimingCount) {
+        return false;
+    }
+
+    const DetailedTiming *t = &fDetailedTimings[index];
+    if (pixelClock)  *pixelClock  = t->pixelClock;
+    if (hActive)     *hActive     = t->hActive;
+    if (hBlank)      *hBlank      = t->hBlank;
+    if (vActive)     *vActive     = t->vActive;
+    if (vBlank)      *vBlank      = t->vBlank;
+    if (hSyncOffset) *hSyncOffset = t->hSyncOffset;
+    if (hSyncWidth)  *hSyncWidth  = t->hSyncWidth;
+    if (vSyncOffset) *vSyncOffset = t->vSyncOffset;
+    if (vSyncWidth)  *vSyncWidth  = t->vSyncWidth;
+    if (flags)       *flags       = t->flags;
+    if (stereo)      *stereo      = t->stereo;
+    return true;
 }
 
 void MyIntelEDIDParser::dumpParsedEDID(void) const

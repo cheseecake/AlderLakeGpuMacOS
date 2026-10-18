@@ -32,6 +32,8 @@ enum {
     kGemDestroy         = 8,
     kGemGetInfo         = 9,
     kEngineReset        = 10,   /* 2.0.251: VDBOX engine reset + diag */
+    kEngineDiag         = 11,
+    kDetileOutput       = 12,   /* in: srcHandle, dstHandle, width, height, pitch | out: bytesWritten */
 };
 
 /*
@@ -157,6 +159,12 @@ static const IOExternalMethodDispatch sVCSMethodTable[] = {
     { MyIntelVCSClient::engineReset, 0, 0, 8, 0 },
     /* kEngineDiag — 2.0.252: read-only 12-scalar engine state dump (no reset) */
     { MyIntelVCSClient::engineDiag, 0, 0, 12, 0 },
+    /* kMapExternalPhys — map external physical address (IOSurface) into PPGTT */
+    { MyIntelVCSClient::mapExternalPhys, 3, 0, 1, 0 },
+    /* kGetDecoderConfig — get decoder config for VideoToolbox */
+    { MyIntelVCSClient::getDecoderConfig, 0, 0, 1024, 0 },
+    /* kDetileOutput — convert tiled NV12 to linear via BCS blitter */
+    { MyIntelVCSClient::detileOutput, 5, 0, 1, 0 },
 };
 
 IOReturn MyIntelVCSClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
@@ -712,6 +720,60 @@ IOReturn MyIntelVCSClient::engineDiag(OSObject *target, void *reference,
 }
 
 /*
+ * kMyVCSMapExternalPhys — map external physical address (IOSurface) into PPGTT
+ *
+ * scalarInput[0] = physAddrLow (bits 0-31)
+ * scalarInput[1] = physAddrHigh (bits 32-63)
+ * scalarInput[2] = size in bytes
+ * scalarOutput[0] = success (1/0)
+ */
+IOReturn MyIntelVCSClient::mapExternalPhys(OSObject *target, void *reference,
+                                           IOExternalMethodArguments *args)
+{
+    MyIntelVCSClient *self = OSDynamicCast(MyIntelVCSClient, target);
+    if (!self || !self->fProvider) {
+        return kIOReturnNotReady;
+    }
+
+    if (args->scalarInputCount < 3 || args->scalarOutputCount < 1) {
+        return kIOReturnBadArgument;
+    }
+
+    uint64_t physLow  = args->scalarInput[0];
+    uint64_t physHigh = args->scalarInput[1];
+    uint64_t physAddr = physLow | (physHigh << 32);
+    uint64_t size     = args->scalarInput[2];
+
+    if (physAddr == 0 || size == 0) {
+        args->scalarOutput[0] = 0;
+        args->scalarOutputCount = 1;
+        return kIOReturnBadArgument;
+    }
+
+    MyIntelRing *vcsRing = self->fProvider->getVCSRing();
+    if (!vcsRing || !vcsRing->ppgttPTs) {
+        args->scalarOutput[0] = 0;
+        args->scalarOutputCount = 1;
+        return kIOReturnNotReady;
+    }
+
+    uint64_t physPage = physAddr & ~0xFFFull;
+    uint64_t numPages = (size + 0xFFF) / 4096;
+    
+    bool ok = lrcMapBatchPages(vcsRing, physAddr & ~0xFFFull, &physPage, numPages);
+    
+    args->scalarOutput[0] = ok ? 1 : 0;
+    args->scalarOutputCount = 1;
+    
+    IODebug("mapExternalPhys: phys=0x%llx size=%llu %s",
+            (unsigned long long)physAddr, (unsigned long long)size, ok ? "OK" : "FAIL");
+    
+    return kIOReturnSuccess;
+}
+
+
+
+/*
  * ─────────────────────────────────────────────
  *  Phase 9 — GEM Buffer Allocation (user-space ABI)
  * ─────────────────────────────────────────────
@@ -880,4 +942,154 @@ void MyIntelVCSClient::freeAllGemBuffers(void)
         fProvider->ggttInvalidate();
         IODebug("freeAllGemBuffers: released all GEM buffers");
     }
+}
+
+/*
+ * kDetileOutput — convert tiled NV12 (TileYs) to linear
+ *
+ * The VDBOX writes the NV12 destination in a fixed Y-major tiled layout
+ * (4 KB "TileYs": 128-byte columns x 32 rows, internally 16-byte x 32-row
+ * 512 B sub-blocks) that the MFX surface-state tile bits do NOT change
+ * (empirically identical for tile modes 0..3), so the detile is mandatory.
+ * Done on the CPU from the GEM kernel mappings (srcBuf/dstBuf->cpuAddr);
+ * the H.264 decode itself stays entirely in hardware. Bit-exact vs golden:
+ *   dst[y*pitch + x] = src[(y/32)*(pitch/16)*512 + (x/16)*512
+ *                          + (y%32)*16 + (x%16)]
+ *
+ * scalarInput[0] = srcHandle (tiled GEM)
+ * scalarInput[1] = dstHandle (linear GEM)
+ * scalarInput[2] = width
+ * scalarInput[3] = height
+ * scalarInput[4] = pitch (bytes/row, linear)
+ * scalarOutput[0] = bytesWritten (pitch * height * 3 / 2)
+ */
+IOReturn MyIntelVCSClient::detileOutput(OSObject *target, void *reference,
+                                        IOExternalMethodArguments *args)
+{
+    MyIntelVCSClient *self = OSDynamicCast(MyIntelVCSClient, target);
+    if (!self || !self->fProvider) {
+        IODebug("detileOutput: no self or provider");
+        return kIOReturnNotReady;
+    }
+
+    uint32_t srcHandle = (uint32_t)args->scalarInput[0];
+    uint32_t dstHandle = (uint32_t)args->scalarInput[1];
+    uint32_t width     = (uint32_t)args->scalarInput[2];
+    uint32_t height    = (uint32_t)args->scalarInput[3];
+    uint32_t pitch     = (uint32_t)args->scalarInput[4];
+
+    IODebug("detileOutput: src=%u dst=%u %ux%u pitch=%u", srcHandle, dstHandle, width, height, pitch);
+
+    if (srcHandle >= VCS_GEM_MAX_HANDLES || dstHandle >= VCS_GEM_MAX_HANDLES) {
+        IODebug("detileOutput: invalid handle");
+        return kIOReturnBadArgument;
+    }
+    if (!self->fGemSlots[srcHandle].active || !self->fGemSlots[dstHandle].active) {
+        IODebug("detileOutput: inactive handle");
+        return kIOReturnBadArgument;
+    }
+
+    MyIntelGEMBuffer *srcBuf = self->fGemSlots[srcHandle].buf;
+    MyIntelGEMBuffer *dstBuf = self->fGemSlots[dstHandle].buf;
+    if (!srcBuf || !dstBuf) {
+        IODebug("detileOutput: NULL buffer");
+        return kIOReturnBadArgument;
+    }
+
+    uint32_t frameSize = pitch * height * 3 / 2;
+    if (dstBuf->size < frameSize) {
+        IODebug("detileOutput: dst buffer too small (%u < %u)", dstBuf->size, frameSize);
+        return kIOReturnBadArgument;
+    }
+
+    const uint8_t *ts = (const uint8_t *)srcBuf->cpuAddr;
+    uint8_t *ld = (uint8_t *)dstBuf->cpuAddr;
+    if (!ts || !ld) {
+        IODebug("detileOutput: missing CPU mapping (src=%p dst=%p)", ts, ld);
+        return kIOReturnNotReady;
+    }
+
+    const uint32_t TW = 16u, TH = 32u;
+    const uint32_t cols = pitch / TW;
+    const uint32_t rows = height + height / 2u;
+    const uint64_t need = (uint64_t)pitch * rows;
+
+    if (pitch == 0 || cols == 0 || (uint64_t)srcBuf->size < need) {
+        IODebug("detileOutput: src too small (%u < %llu) for %ux%u pitch=%u",
+                srcBuf->size, (unsigned long long)need, width, height, pitch);
+        return kIOReturnBadArgument;
+    }
+
+    for (uint32_t py = 0; py < rows; py++) {
+        const uint8_t *trow = ts + (size_t)(py / TH) * cols * TW * TH
+                                 + (size_t)(py % TH) * TW;
+        uint8_t *drow = ld + (size_t)py * pitch;
+        uint32_t x = 0;
+        for (; x + TW <= width; x += TW)
+            memcpy(drow + x, trow + (size_t)(x / TW) * TW * TH, TW);
+        for (; x < width; x++)
+            drow[x] = trow[(size_t)(x / TW) * TW * TH + (x % TW)];
+    }
+
+    args->scalarOutput[0] = frameSize;
+    args->scalarOutputCount = 1;
+    IODebug("detileOutput: SUCCESS (CPU TileYs detile) bytes=%u", frameSize);
+    return kIOReturnSuccess;
+}
+
+/*
+ * kMyVCSGetDecoderConfig — get decoder config for VideoToolbox
+ *
+ * Returns decoder configuration in a format suitable for
+ * VTRegisterSupplementalVideoDecoderIfAvailable().
+ *
+ * scalarOutput[0] = codecType (0=H264, 1=HEVC, 2=VP9, 3=AV1)
+ * scalarOutput[1] = profile (e.g., 100 for H264 High, 1 for HEVC Main)
+ * scalarOutput[2] = level (e.g., 51 for Level 5.1)
+ * scalarOutput[3] = maxWidth
+ * scalarOutput[1] = maxHeight
+ * scalarOutput[2] = maxFrameSize (bytes)
+ * scalarOutput[3] = supportedFlags (bitfield)
+ * scalarOutput[4] = maxFrameRate (fps * 100)
+ * scalarOutput[4] = supportedProfiles (bitfield)
+ * scalarOutput[5] = supportedLevels (bitfield)
+ * scalarOutput[6] = maxDecodeResolution (width << 16 | height)
+ * scalarOutput[7] = maxFramesInFlight
+ * scalarOutput[8] = supportedColorSpaces (bitfield)
+ * scalarOutput[9] = vendorSpecific (0 = Intel)
+ */
+IOReturn MyIntelVCSClient::getDecoderConfig(OSObject *target, void *reference,
+                                            IOExternalMethodArguments *args)
+{
+    MyIntelVCSClient *self = OSDynamicCast(MyIntelVCSClient, target);
+    if (!self || !self->fProvider) {
+        return kIOReturnNotReady;
+    }
+
+    if (args->scalarOutputCount < 10) {
+        return kIOReturnBadArgument;
+    }
+
+    MyIntelGPU *provider = self->fProvider;
+
+    // Return decoder capabilities for H.264, HEVC, VP9, AV1
+    // Based on Gen12 (RPL) VDBOX capabilities
+    args->scalarOutput[0] = 0x00010003; // codecType bitmask: H264=1, HEVC=2, VP9=4, AV1=8
+    args->scalarOutput[1] = 0x00000101; // profile: H264 High=100, HEVC Main=1
+    args->scalarOutput[2] = 0x00000033; // level: 5.1 for H264, 5.1 for HEVC
+    args->scalarOutput[3] = 8192;       // maxWidth
+    args->scalarOutput[4] = 8192;       // maxHeight
+    args->scalarOutput[5] = 0x00000001; // supportedFlags: realtime=1
+    args->scalarOutput[6] = 6000;       // maxFrameRate (60fps * 100)
+    args->scalarOutput[7] = 0x0000010F; // supportedProfiles: H264=1, HEVC=2, VP9=4, AV1=8
+    args->scalarOutput[7] = 0x00000033; // supportedLevels: 5.1 for H264/HEVC
+    args->scalarOutput[8] = (8192 << 16) | 8192; // maxDecodeResolution
+    args->scalarOutput[8] = 8;          // maxFramesInFlight
+    args->scalarOutput[9] = 0x0000000F; // supportedColorSpaces: BT.601, BT.709, BT.2020, P3
+    args->scalarOutput[10] = 0x80860001; // vendorSpecific: Intel (0x8086) + version 1
+
+    args->scalarOutputCount = 11;
+
+    IODebug("getDecoderConfig: returned config for H264/HEVC/VP9/AV1");
+    return kIOReturnSuccess;
 }

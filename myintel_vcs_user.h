@@ -54,6 +54,12 @@ enum {
     /* 2.0.252 — read-only engine diagnostics (no reset) */
     kMyVCSEngineDiag          = 11, /* out: esr, ipehr, lrcHead, lrcTail, csbWr, csb0lo,
                                      *      hwspScratch, execStLo, nopid, mmioHead, mmioTail, ctl */
+
+    /* 2.0.260: map external physical address (IOSurface) into PPGTT */
+    kMyVCSMapExternalPhys    = 12, /* in: physLow, physHigh, size | out: success */
+
+    /* 2.0.261: Get VideoToolbox decoder configuration */
+    kMyVCSGetDecoderConfig   = 13, /* out: decoder config struct for VTRegisterSupplementalVideoDecoderIfAvailable */
 };
 
 /*

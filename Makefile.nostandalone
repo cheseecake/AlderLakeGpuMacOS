@@ -41,7 +41,7 @@ LDFLAGS = -Xlinker -kext
 SRC = MyIntelGPU.cpp IntelFramebuffer.cpp MyIntelFramebuffer.cpp \
       MyIntelAccelerator.cpp MyIntelMedia.cpp \
       MyIntelRing.cpp MyIntelGEMBuffer.cpp MyIntelGPUClient.cpp \
-      MyIntelVCSCommand.cpp MyIntelVCSClient.cpp kern_start.cpp
+      MyIntelVCSCommand.cpp MyIntelVCSClient.cpp
       
 OBJ = $(SRC:.cpp=.o)
 

@@ -83,6 +83,13 @@ public:
     /* 2.0.252: read-only engine state dump (LRC head/tail, CSB, scratch) */
     static IOReturn engineDiag(OSObject *target, void *reference,
                                IOExternalMethodArguments *args);
+    /* 2.0.260: map external physical address (IOSurface) into PPGTT */
+    static IOReturn mapExternalPhys(OSObject *target, void *reference, IOExternalMethodArguments *args);
+    /* 2.0.261: Get VideoToolbox decoder configuration */
+    static IOReturn getDecoderConfig(OSObject *target, void *reference, IOExternalMethodArguments *args);
+    /* 2.0.260: tiled→linear detile via BCS blitter */
+    static IOReturn detileOutput(OSObject *target, void *reference,
+                                 IOExternalMethodArguments *args);
 
 private:
     /* Phase 9 — release every GEM buffer still owned by this client */

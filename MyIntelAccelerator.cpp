@@ -226,6 +226,12 @@ bool MyIntelAccelerator::publishProperties(void)
     setProperty("IOAccelRevision", (uint64_t)0x0001, 32);
     setProperty("IOAccelTypes",    (uint64_t)0x0001, 32);
 
+    /* Metal plugin binding — Metal framework reads MetalPluginName off the
+     * accelerator node and probes /Library/GPUBundles/<MetalPluginName>.bundle
+     * (MISSION-D M1/M1.5). Without these keys Metal never looks for our bundle. */
+    setProperty("MetalPluginName", "MyIntelGPUMTLDriver");
+    setProperty("MetalPluginClassName", "MyIntelGPUMTLDevice");
+
     setProperty("VDBOXSupported", kOSBooleanTrue);
     setProperty("MyIntelVCSReady", kOSBooleanTrue);
 
@@ -336,14 +342,56 @@ IOReturn MyIntelAccelClient::externalMethod(uint32_t selector,
     if (fClientType == 5) {
         myAccelNameInitOnce();
         switch (selector) {
+        case 9: { /* set API property name — 16B structIn e.g. "Metal\0..." */
+            AccelDebug("DISC M2C sel=9 apiName stIn=%lu stOut=%lu",
+                       (unsigned long)arguments->structureInputSize,
+                       (unsigned long)arguments->structureOutputSize);
+            return kIOReturnSuccess;
+        }
+        case 2: { /* get device caps — 600B structOut (IOAccelDeviceCreateWithAPIProperty) */
+            if (!arguments->structureOutput || arguments->structureOutputSize < 600)
+                return kIOReturnBadArgument;
+            uint8_t *caps = (uint8_t *)arguments->structureOutput;
+            bzero(caps, arguments->structureOutputSize);
+            strlcpy((char *)(caps + 0x18), gMyAccelName, 64);
+            AccelDebug("DISC M2C sel=2 caps 600B name=%s", gMyAccelName);
+            return kIOReturnSuccess;
+        }
+        case 10: { /* WindowServer dirtyRing 24B — non-Metal path */
+            if (!arguments->structureOutput || arguments->structureOutputSize < 24)
+                return kIOReturnBadArgument;
+            if (!fDirtyRingMD) {
+                fDirtyRingMD = IOBufferMemoryDescriptor::withOptions(kIODirectionInOut | kIOMemoryBufferPageable, 4096, PAGE_SIZE);
+                if (!fDirtyRingMD) return kIOReturnNoMemory;
+                if (fDirtyRingMD->prepare() != kIOReturnSuccess) { fDirtyRingMD->release(); fDirtyRingMD = NULL; return kIOReturnNoMemory; }
+                fDirtyRingMap = fDirtyRingMD->createMappingInTask(fClientTask, 0, kIOMapAnywhere);
+                if (!fDirtyRingMap) { fDirtyRingMD->complete(); fDirtyRingMD->release(); fDirtyRingMD = NULL; return kIOReturnNoMemory; }
+                fDirtyRingUserVA = fDirtyRingMap->getVirtualAddress();
+                IOMemoryMap *kernMap = fDirtyRingMD->map(kIOMapInhibitCache);
+                if (kernMap) {
+                    void *kernVA = (void *)kernMap->getVirtualAddress();
+                    bzero(kernVA, 4096);
+                    *(uint32_t*)((uint8_t*)kernVA + 4) = 64;
+                    kernMap->release();
+                }
+                IOLog("MyIntelAccelerator::[dirtyRing] allocated userVA=0x%llx cap=64 (type5)\n", fDirtyRingUserVA);
+            }
+            uint64_t *out = (uint64_t *)arguments->structureOutput;
+            out[0] = fDirtyRingUserVA;
+            out[1] = 0;
+            out[2] = 0;
+            arguments->structureOutputSize = 24;
+            IOLog("MyIntelAccelerator::[dirtyRing] type5 sel10 return va=0x%llx 24B\n", fDirtyRingUserVA);
+            return kIOReturnSuccess;
+        }
         default:
-            AccelDebug("DISC M2C sel=%u in=%u out=%u stIn=%lu stOut=%lu -> REJECTED (Metal functionality removed)",
+            AccelDebug("DISC M2C sel=%u in=%u out=%u stIn=%lu stOut=%lu -> SUCCESS",
                        (unsigned int)selector,
                        (unsigned int)arguments->scalarInputCount,
                        (unsigned int)arguments->scalarOutputCount,
                        (unsigned long)arguments->structureInputSize,
                        (unsigned long)arguments->structureOutputSize);
-            return kIOReturnUnsupported;
+            return kIOReturnSuccess;
         }
     }
 

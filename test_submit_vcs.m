@@ -573,7 +573,7 @@ int main(int argc, char *argv[])
     } else {
         /* ── Phase 9 template (regression path) ── */
         vcsCmdMfxPipeModeSelect(&cmdBuf, VCS_CMD_H264_DECODE, true);
-        vcsCmdMfxSurfaceState(&cmdBuf, W, H, VCS_SURFACE_NV12, dstGgtt);
+        vcsCmdMfxSurfaceState(&cmdBuf, W, H, VCS_SURFACE_NV12, dstGgtt, false);
         uint32_t surfaces[4] = { dstGgtt, srcGgtt, 0, 0 };
         vcsCmdMfxPipeBufAddrState(&cmdBuf, surfaces, 4);
         vcsCmdMfxIndObjBaseAddrState(&cmdBuf, srcGgtt, bit ? (uint32_t)bitLen : 0);

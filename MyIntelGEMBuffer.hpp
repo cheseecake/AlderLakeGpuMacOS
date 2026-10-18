@@ -167,6 +167,14 @@ typedef struct {
     uint32_t    planeSavedStride;/* original PLANE_STRIDE */
     uint32_t    planeSavedSize;  /* original PLANE_SIZE   */
     uint32_t    planeSavedSurf;  /* original PLANE_SURF   */
+    /* NV12 (multi-plane) scanout extra snapshot — set only by
+     * MyIntelGPU::programPlaneNV12(). restorePlane() writes these back
+     * only when planeIsNV12 is true (XRGB paths never touch them). */
+    bool        planeIsNV12;    /* true if bound via programPlaneNV12() */
+    uint32_t    planeSavedColorCtl; /* original PLANE_COLOR_CTL */
+    uint32_t    planeSavedOffset;   /* original PLANE_OFFSET  */
+    uint32_t    planeSavedAuxDist;  /* original PLANE_AUX_DIST  */
+    uint32_t    planeSavedAuxOffset;/* original PLANE_AUX_OFFSET */
 
     /* Debug */
     uint32_t    magic;          /* Magic number for validation */
@@ -325,6 +333,53 @@ void gemBufferClearPTEs(
     uint32_t *gsmPtr,
     uint32_t  startPage,
     uint32_t  pages);
+
+/*!
+ * @brief Bind EXTERNAL physical pages into GGTT (no GEM buffer ownership).
+ *
+ * Maps an arbitrary caller-supplied array of physical (GT/DMA) page addresses
+ * into a free GGTT region: one PTE per page + OSSynchronizeIO() barrier + TLB
+ * invalidate (invalidate-by-contract, identical sequence to
+ * gemBufferBindToGGTT). Gives memory this driver does NOT own (e.g. a
+ * userspace-owned IOSurface / shared buffer) a GGTT address so the display
+ * plane can scan it out or the BCS blitter can address it.
+ *
+ * @param pagesPhys  per-page physical addresses (pageCount entries)
+ * @param pageCount  number of pages
+ * @param gsmPtr     GTT Stolen Memory (fGsm) — PTE table
+ * @param gttTotal   GGTT total entries
+ * @param invalidateFn invalidate-by-contract callback (may be NULL only with NULL gsmPtr)
+ * @param invalidateCtx context passed to invalidateFn
+ * @return ggttOffset in bytes on success; 0 on failure (bad args / no free region)
+ */
+uint32_t ggttBindExternalPages(
+    const uint64_t    *pagesPhys,
+    uint32_t           pageCount,
+    uint32_t          *gsmPtr,
+    uint32_t           gttTotal,
+    GGTTInvalidateFunc invalidateFn,
+    void              *invalidateCtx);
+
+/*!
+ * @brief Clear GGTT PTEs for an externally-bound region + TLB invalidate.
+ *
+ * Counterpart of ggttBindExternalPages(). Caller MUST have stopped any engine
+ * or plane use of the range first — invalidate alone does not make an active
+ * scanout safe (same contract as gemBufferUnbindFromGGTT).
+ *
+ * @param ggttOffset  byte offset returned by ggttBindExternalPages()
+ * @param pageCount   pages originally bound
+ * @param gsmPtr      GTT Stolen Memory (fGsm)
+ * @param invalidateFn invalidate-by-contract callback (may be NULL only with NULL gsmPtr)
+ * @param invalidateCtx context passed to invalidateFn
+ * @return true on success
+ */
+bool ggttUnbindExternalPages(
+    uint32_t           ggttOffset,
+    uint32_t           pageCount,
+    uint32_t          *gsmPtr,
+    GGTTInvalidateFunc invalidateFn,
+    void              *invalidateCtx);
 
 static inline uint64_t gemBufferMakePTE(
     uint64_t dmaAddr,

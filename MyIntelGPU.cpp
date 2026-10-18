@@ -273,6 +273,7 @@ bool MyIntelGPU::init(OSDictionary *dict)
     fFramebuffer  = NULL;
     fDisplayFramebuffer = NULL;
     fAccelerator  = NULL;
+    fPlaneNV12    = false;
 
     /* Phase 5 — HW Acceleration */
     fRingRCS       = NULL;
@@ -663,7 +664,7 @@ void MyIntelGPU::buildTranslationTable(void)
                         for (unsigned i = 0; i + nlen <= len; ++i) {
                             unsigned j = 0;
                             for (; j < nlen; ++j) if (str[i+j] != needle[j]) break;
-                            if (j == nlen) { rcsOn = true; IOLog("MyIntelGPU: RCS0 fallback IORegistry(OSString) hit -> rcsOn=1\n"); break; }
+                            if (j == nlen) { rcsOn = true; IOLog("RCS0 fallback OSString -> on\n"); break; }
                         }
                     }
                 } else if (OSData *bootArgsData = OSDynamicCast(OSData, chosen->getProperty("boot-args"))) {
@@ -673,13 +674,13 @@ void MyIntelGPU::buildTranslationTable(void)
                         for (unsigned i = 0; i + nlen <= len; ++i) {
                             unsigned j = 0;
                             for (; j < nlen; ++j) if (str[i+j] != needle[j]) break;
-                            if (j == nlen) { rcsOn = true; IOLog("MyIntelGPU: RCS0 fallback IORegistry(OSData) hit -> rcsOn=1\n"); break; }
+                            if (j == nlen) { rcsOn = true; IOLog("RCS0 fallback OSData -> on\n"); break; }
                         }
                     }
                 }
                 chosen->release();
             }
-            if (!rcsOn) { rcsOn = true; IOLog("MyIntelGPU: RCS0 force-active (debug, PE_parse+fallback missed but myintelrcs=1 expected)\n"); }
+            if (!rcsOn) { rcsOn = true; IOLog("RCS0 force-active (myintelrcs=1)\n"); }
         }
         fTransTable[fTransCount].enabled = rcsOn;
         IOLog("MyIntelGPU: RCS0 gate myintelrcs=%d -> %s\n", rcsOn, rcsOn ? "[active]" : "[skipped]");
@@ -1291,7 +1292,7 @@ bool MyIntelGPU::detectStolenMemory(void)
 
     fStolenBase = base;
     fStolenSize = (uint32_t)size;
-    IODebug("GGTTDBG: stolenBase=0x%llX stolenSize=%u MB (%u bytes) — DSMBASE/GMS early detect",
+    IODebug("GGTTDBG: stolen base=%llX size=%u MB (%u b)",
             fStolenBase, fStolenSize >> 20, fStolenSize);
     return true;
 }
@@ -1440,7 +1441,7 @@ bool MyIntelGPU::ggttInitHardware(void)
          * createVRAMDescriptor's Phase 4.3 fix calls when these are still 0.
          * The PTE scan above is for GGTT zeroing only.
          */
-        IOLog("GGTTDBG: fb PTE run base=0x%llX pages=%u — zeroing only, stolen comes from DSMBASE/GMS",
+        IOLog("GGTTDBG: fb PTE base=%llX pages=%u",
               fbBase, fbEnd);
 
         if (fbEnd > 0 && fbEnd < fGttTotal) {
@@ -1589,27 +1590,178 @@ void MyIntelGPU::clflushRange(const void *addr, size_t size)
 #pragma mark -
 #pragma mark - Display / Panel Methods
 
+bool MyIntelGPU::enableDisplayPowerWells(void)
+{
+    if (!fRegs) return false;
+    if (!forceWakeGet()) {
+        IODebug("PWR_WELL: forcewake failed");
+        return false;
+    }
+    struct WellReq { uint32_t reg; uint32_t idx; const char *name; };
+    static const WellReq wells[] = {
+        { HSW_PWR_WELL_CTL2,   PWR_WELL_IDX_PW2,   "PW2" },
+        { HSW_PWR_WELL_CTL2,   PWR_WELL_IDX_PW_A,  "PW_A" },
+        { ICL_PWR_WELL_CTL_DDI2, PWR_WELL_IDX_DDI_A, "DDI_A_IO" },
+        { ICL_PWR_WELL_CTL_AUX2, PWR_WELL_IDX_DDI_A, "AUX_A" },
+    };
+    bool ok = true;
+    for (size_t w = 0; w < sizeof(wells) / sizeof(wells[0]); w++) {
+        uint32_t val = readReg32(wells[w].reg);
+        val |= PWR_WELL_REQ(wells[w].idx);
+        writeReg32(wells[w].reg, val);
+        bool locked = false;
+        for (int i = 0; i < 2000; i++) {
+            uint32_t cur = readReg32(wells[w].reg);
+            if (cur & PWR_WELL_STATE(wells[w].idx)) { locked = true; break; }
+            IODelay(10);
+        }
+        uint32_t cur = readReg32(wells[w].reg);
+        IODebug("PWR_WELL %s %X=%X %s",
+                wells[w].name, wells[w].reg, cur, locked ? "ON" : "TIMEOUT");
+        if (!locked) ok = false;
+    }
+    forceWakePut();
+    return ok;
+}
+
 bool MyIntelGPU::initCDCLK(void)
 {
     if (!fRegs) return false;
+    if (!forceWakeGet()) return false;
+
+    /* Step 1: Set CDCLK frequency selection (TGL/RPL: 0x46000 bits 27:26)
+     * 0 = 157.5 MHz, 1 = 312 MHz, 2 = 336 MHz, 3 = 624 MHz
+     * For eDP HBR2 1920x1080@60: 312 MHz is standard */
     uint32_t cdclk = readReg32(CDCLK_CTL);
-    IODebug("CDCLK_CTL = 0x%08X", cdclk);
+    IODebug("CDCLK in=%X", cdclk);
+    cdclk &= ~CDCLK_FREQ_SEL_MASK;  // Clear bits 27:26
+    cdclk |= (1U << 26);            // Select 312 MHz (value 1)
+    writeReg32(CDCLK_CTL, cdclk);
+    IODebug("CDCLK sel=%X", readReg32(CDCLK_CTL));
+
+    /* Step 2: Enable CDCLK PLL (0x46070 bit 31) and wait for lock (bit 30) */
+    uint32_t pll = readReg32(CDCLK_PLL_ENABLE);
+    if (!(pll & CDCLK_PLL_ENABLE_BIT)) {
+        pll |= CDCLK_PLL_ENABLE_BIT;
+        writeReg32(CDCLK_PLL_ENABLE, pll);
+        bool locked = false;
+        for (int i = 0; i < 5000; i++) {
+            uint32_t cur = readReg32(CDCLK_PLL_ENABLE);
+            if (cur & CDCLK_PLL_LOCK_BIT) { locked = true; break; }
+            IODelay(10);
+        }
+        if (!locked) {
+            IODebug("CDCLK PLL tmo %X",
+                    readReg32(CDCLK_PLL_ENABLE));
+            forceWakePut();
+            return false;
+        }
+        IODebug("CDCLK PLL locked");
+    }
+
+    cdclk = readReg32(CDCLK_CTL);
+    IODebug("CDCLK=%X", cdclk);
+    forceWakePut();
     if (cdclk == 0 || cdclk == 0xFFFFFFFF) {
-        IODebug("CDCLK not accessible");
+        IODebug("CDCLK inaccessible");
         return false;
     }
-    IODebug("CDCLK: frequency valid");
+    IODebug("CDCLK 312MHz");
     return true;
 }
 
 bool MyIntelGPU::initDPLL(void)
 {
     if (!fRegs) return false;
+    if (!forceWakeGet()) return false;
+
     uint32_t dpllEn = readReg32(DPLL0_ENABLE);
-    IODebug("DPLL0_ENABLE = 0x%08X", dpllEn);
-    dpllEn |= 0x80000000;
+    IODebug("DPLL0 in=%X", dpllEn);
+
+    /* Step 1: Check if already locked */
+    if ((dpllEn & DPLL_ENABLE_BIT) && (dpllEn & DPLL_LOCK_BIT)) {
+        IODebug("DPLL0 already locked");
+        forceWakePut();
+        return true;
+    }
+
+    /* Step 2: Program DPLL_CFGCR0 (0x164284) - DCO frequency
+     * eDP HBR2: 5.4 Gbps/lane x 4 lanes = 21.6 Gbps total
+     * DCO = 2x data rate = 10.8 GHz, ref clk = 100 MHz
+     * DCO_INTEGER = 108 (0x6C), DCO_FRACTION = 0 */
+    IODebug("CFGCR0=1B000000");
+    writeReg32(DPLL0_CFGCR0, 0x1B000000);
+
+    /* Step 3: Program DPLL_CFGCR1 (0x164288) - Mode and reference
+     * MODE=0 (DP), REF_CLK_SEL=2 (100MHz), SSC disabled */
+    IODebug("CFGCR1=00800000");
+    writeReg32(DPLL0_CFGCR1, 0x00800000);
+
+    /* Step 4: Enable DPLL and wait for lock */
+    dpllEn |= DPLL_ENABLE_BIT;
     writeReg32(DPLL0_ENABLE, dpllEn);
-    IODebug("DPLL0 enabled");
+    IODebug("DPLL0 en=%X", readReg32(DPLL0_ENABLE));
+
+    bool locked = false;
+    for (int i = 0; i < 20000; i++) {
+        uint32_t cur = readReg32(DPLL0_ENABLE);
+        if ((cur & DPLL_ENABLE_BIT) && (cur & DPLL_LOCK_BIT)) { locked = true; break; }
+        IODelay(10);
+    }
+    dpllEn = readReg32(DPLL0_ENABLE);
+    if (!locked) {
+        IODebug("DPLL0 tmo %X", dpllEn);
+        forceWakePut();
+        return false;
+    }
+    IODebug("DPLL0 locked %X", dpllEn);
+    forceWakePut();
+    return true;
+}
+
+bool MyIntelGPU::initDDI(void)
+{
+    if (!fRegs) return false;
+    IODebug("=== DDI Init ===");
+    if (!forceWakeGet()) return false;
+    uint32_t pw = readReg32(HSW_PWR_WELL_CTL2);
+    if (!(pw & PWR_WELL_STATE(PWR_WELL_IDX_PW_A))) {
+        IODebug("DDI abort PW_A off %X", pw);
+        forceWakePut();
+        return false;
+    }
+    uint32_t cdclk = readReg32(CDCLK_CTL);
+    if (cdclk == 0 || cdclk == 0xFFFFFFFF) {
+        IODebug("DDI abort CDCLK %X", cdclk);
+        forceWakePut();
+        return false;
+    }
+    // Gen12 signal levels live in combo PHY A (0x162000+), NOT DDI_BUF_TRANS —
+    // i915 has_buf_trans_select() = DISPLAY_VER < 10. Read-only probe: BIOS owns these.
+    uint32_t txDw5 = readReg32(ICL_PORT_TX_DW5_GRP_A);
+    uint32_t txDw2 = readReg32(ICL_PORT_TX_DW2_LN0_A);
+    IODebug("PHY A DW5=%X DW2=%X", txDw5, txDw2);
+    // Same-value RMW round-trip on DDI_BUF_TRANS_A: proves the MMIO write path
+    // reaches the DDI block without touching BIOS PHY config (reg is Gen9-only —
+    // on Gen12 a mismatch means the reg does not exist, NOTE only, non-fatal).
+    const uint32_t loOff = DDI_BUF_TRANS_LO(DDI_BUF_TRANS_A_BASE, 0);
+    const uint32_t hiOff = DDI_BUF_TRANS_HI(DDI_BUF_TRANS_A_BASE, 0);
+    uint32_t loVal = readReg32(loOff);
+    uint32_t hiVal = readReg32(hiOff);
+    IODebug("BUF_TRANS LO=%X HI=%X @%X/%X",
+            loVal, hiVal, loOff, hiOff);
+    writeReg32(loOff, loVal);
+    writeReg32(hiOff, hiVal);
+    uint32_t loRb = readReg32(loOff);
+    uint32_t hiRb = readReg32(hiOff);
+    forceWakePut();
+    if (loRb != loVal || hiRb != hiVal) {
+        IODebug("BUF_TRANS mismatch w%X/%X r%X/%X",
+                loVal, hiVal, loRb, hiRb);
+    } else {
+        IODebug("BUF_TRANS RMW ok");
+    }
+    IODebug("DDI init ok");
     return true;
 }
 
@@ -1708,7 +1860,7 @@ void MyIntelGPU::snapshotDisplayState(void)
     fSavedPipeConf     = readReg32(PIPE_A_BASE + 0x244);
     fSavedTransConf    = readReg32(TRANSCODER_A_BASE + 0x1C);
     fPlaneSnapshotValid = true;
-    IODebug("Display snapshot (BIOS baseline): PLANE_CTL=0x%08X STRIDE=0x%08X SIZE=0x%08X SURF=0x%08X PIPE_CONF=0x%08X TRANS_CONF=0x%08X",
+    IODebug("Display snapshot: CTL=%X STRIDE=%X SIZE=%X SURF=%X PIPE=%X TRANS=%X",
             fSavedPlaneCtl, fSavedPlaneStride, fSavedPlaneSize, fSavedPlaneSurf,
             fSavedPipeConf, fSavedTransConf);
 }
@@ -1721,14 +1873,14 @@ void MyIntelGPU::dumpDelayedDisplayState(void)
     IODebug("Plane 1A after takeover: ENABLE=%s SURF=0x%08X",
             (ctl & 0x80000000) ? "YES" : "NO (DISABLED)", surf);
     if (fPlaneSnapshotValid) {
-        IODebug("Compare: CTL 0x%08X → 0x%08X | SURF 0x%08X → 0x%08X | PIPE 0x%08X → 0x%08X | TRANS 0x%08X → 0x%08X",
+        IODebug("Compare: CTL %X>%X SURF %X>%X PIPE %X>%X TRANS %X>%X",
                 fSavedPlaneCtl, ctl, fSavedPlaneSurf, surf,
                 fSavedPipeConf, readReg32(PIPE_A_BASE + 0x244),
                 fSavedTransConf, readReg32(TRANSCODER_A_BASE + 0x1C));
         if ((fSavedPlaneCtl & 0x80000000) && !(ctl & 0x80000000)) {
-            IODebug(">>> PLANE 1A WAS DISABLED after WindowServer takeover — NDRV release theory CONFIRMED");
+            IODebug(">>> PLANE 1A disabled after WS takeover");
         } else if ((fSavedPlaneCtl & 0x80000000) && (ctl & 0x80000000)) {
-            IODebug(">>> Plane 1A STILL ENABLED — plane alive; desktop must be landing elsewhere (check SURF target)");
+            IODebug(">>> Plane 1A still enabled — desktop elsewhere");
         }
         if (fSavedPipeConf != readReg32(PIPE_A_BASE + 0x244)) {
             IODebug(">>> PIPE_CONF_A CHANGED (0x%08X → 0x%08X) — pipe was reprogrammed",
@@ -1759,7 +1911,7 @@ bool MyIntelGPU::injectEDIDOnce(void)
 {
         /* Real panel EDID: KDB0924 / KD156N2930A02 (15.3\" 1920x1080 DP).
      * Source: Windows registry dump via Extract-EDID.ps1 2026-08-24;
-     * checksum 0x03 (D4 tag 0xFE->0xFC Display Product Name, 2026-09-09).
+     * checksum 0x01 (D4 tag 0xFE — 2026-10-11 reverted the 0xFC name hack).
      * Supersedes OCR-derived approximation. */
     static const UInt8 edid[128] = {
         0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x2C, 0x82, 0x24, 0x09, 0x00, 0x00, 0x00, 0x00,
@@ -1768,8 +1920,8 @@ bool MyIntelGPU::injectEDIDOnce(void)
         0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x2A, 0x36, 0x80, 0xA0, 0x70, 0x38, 0x1F, 0x40, 0x30, 0x20,
         0x35, 0x00, 0x58, 0xC2, 0x10, 0x00, 0x00, 0x1A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1A, 0x00, 0x00, 0x00, 0xFE, 0x00, 0x4B,
-        0x44, 0x31, 0x35, 0x36, 0x4E, 0x32, 0x39, 0x33, 0x30, 0x41, 0x30, 0x36, 0x00, 0x00, 0x00, 0xFC,
-        0x00, 0x4B, 0x44, 0x31, 0x35, 0x36, 0x4E, 0x32, 0x39, 0x33, 0x30, 0x41, 0x30, 0x32, 0x00, 0x03
+        0x44, 0x31, 0x35, 0x36, 0x4E, 0x32, 0x39, 0x33, 0x30, 0x41, 0x30, 0x36, 0x00, 0x00, 0x00, 0xFE,
+        0x00, 0x4B, 0x44, 0x31, 0x35, 0x36, 0x4E, 0x32, 0x39, 0x33, 0x30, 0x41, 0x30, 0x32, 0x00, 0x01
     };
 
     if (fEdidDebug)
@@ -1963,8 +2115,9 @@ void MyIntelGPU::armPlaneSelfTest(void)
 {
     uint32_t flag = 0;
     if (!PE_parse_boot_argn("myplane", &flag, sizeof(flag)) || !flag) return;
+    fPlaneNV12 = (flag > 1);   /* myplane=2 selects the NV12 scanout test */
 
-    IOLog("MyIntelGPU: [myplane] scanout self-test ARMED via boot-arg\n");
+    IOLog("MyIntelGPU: [myplane] ARMED mode=%u\n", fPlaneNV12 ? 2 : 1);
     fPlaneTimer = IOTimerEventSource::timerEventSource(this,
                                                        &MyIntelGPU::sPlaneTimerFired);
     if (!fPlaneTimer) {
@@ -2346,7 +2499,7 @@ bool MyIntelGPU::accelBatchBlit(void)
             srcPx[i] = 0x00FF0000u;  /* Red pattern */
         }
         clflushRange(fAccelBatchSrcBuf->cpuAddr, fbBytes);
-        IOLog("MyIntelGPU: [batchblit] lazy src alloc ggtt=0x%08X (red pattern)\n",
+        IOLog("[batchblit] lazy src ggtt=%X\n",
               fAccelBatchSrcBuf->ggttOffset);
     }
 
@@ -2401,7 +2554,7 @@ bool MyIntelGPU::accelBatchBlit(void)
         cs[idx++] = MI_BATCH_BUFFER_END;               /* 0x05000000 */
 
         clflushRange(fAccelBatchBuf->cpuAddr, 0x1000u);
-        IOLog("MyIntelGPU: [batchblit] batch built: %u dwords (BLIT_CCTL + XY_FAST_COPY_BLT + FLUSH + BBE)\n", idx);
+        IOLog("[batchblit] batch: %u dwords\n", idx);
     }
 
     const uint64_t *bPhys = _gemGetPagesPhys(this, fAccelBatchBuf);
@@ -2443,14 +2596,14 @@ bool MyIntelGPU::accelBatchBlit(void)
             return true;
         }
     }
-    IOLog("MyIntelGPU: [batchblit] head NOT advancing — engine still gated\n");
+    IOLog("[batchblit] head stuck — engine gated\n");
     return false;
 }
 
 void MyIntelGPU::armAccelDefer(uint32_t mode)
 {
     fAccelDeferMode = mode;
-    IOLog("MyIntelGPU: [myacceldefer] deferred accelerator ARMED (mode=%u, t+45s)\n", mode);
+    IOLog("[myacceldefer] ARMED mode=%u t+45s\n", mode);
     fAccelDeferTimer = IOTimerEventSource::timerEventSource(this,
                                                       &MyIntelGPU::sAccelDeferTimerFired);
     if (!fAccelDeferTimer ||
@@ -2470,9 +2623,9 @@ void MyIntelGPU::sAccelDeferTimerFired(OSObject *owner, IOTimerEventSource *send
     MyIntelGPU *self = OSDynamicCast(MyIntelGPU, owner);
     if (!self || self->fStopping) { sender->cancelTimeout(); return; }
 
-    IOLog("MyIntelGPU: [myacceldefer] creating accelerator NOW (post-stabilization)\n");
+    IOLog("[myacceldefer] creating NOW\n");
     if (self->createAcceleratorNode(self->fAccelDeferMode))
-        IOLog("MyIntelGPU: [myacceldefer] node LIVE — watching SkyLight adoption\n");
+        IOLog("[myacceldefer] node LIVE\n");
     else
         IOLog("MyIntelGPU: [myacceldefer] creation FAILED\n");
 }
@@ -2813,22 +2966,35 @@ void MyIntelGPU::armVblankTicker(void)
     IODebug("Vblank ticker armed (synthetic 60Hz)");
 }
 
-bool MyIntelGPU::programPlane(MyIntelGEMBuffer *buf)
+bool MyIntelGPU::programPlane(MyIntelGEMBuffer *buf, bool fillTestPattern,
+                                 uint32_t hActive, uint32_t vActive)
 {
     if (!buf || !fRegs || !isValidRegs()) return false;
     if (buf->magic != GEM_BUFFER_MAGIC || !buf->ggttOffset || !buf->cpuAddr) return false;
 
-    const uint32_t hActive = 1920;
-    const uint32_t vActive = 1080;
-    const uint32_t stride  = hActive * 4;          /* 7680 — 64B aligned */
-    const uint32_t fbBytes = stride * vActive;     /* 8,294,400 */
-    if (buf->size < fbBytes) {
-        IODebug("programPlane: buffer too small (%u < %u)", buf->size, fbBytes);
-        return false;
-    }
+    /* NV12: Y plane (hActive B/row) then interleaved UV at uvOffset.
+     * XRGB: one 32-bit plane. */
+    const uint32_t stride   = fPlaneNV12 ? hActive : hActive * 4;
+    const uint32_t uvOffset = fPlaneNV12 ? ((hActive * vActive + 4095u) & ~4095u) : 0;
+    const uint32_t fbBytes  = fPlaneNV12 ? uvOffset + stride * (vActive / 2)
+                                         : stride * vActive;
+    if (buf->size < fbBytes) return false;
 
-    uint32_t *px = (uint32_t *)buf->cpuAddr;
-    for (uint32_t i = 0; i < fbBytes / 4; i++) px[i] = 0x000000FF;  /* solid blue */
+    if (fillTestPattern) {
+        if (fPlaneNV12) {
+            /* Two flat luma halves (top=16, bottom=235): a stride/tiling error
+             * shows as a misplaced boundary line; neutral chroma (U=V=128) so a
+             * wrong AUX_DIST shows as a luma anomaly against the expected gray. */
+            uint8_t *base = (uint8_t *)buf->cpuAddr;
+            const uint32_t half = (uint32_t)((uint64_t)vActive * stride / 2);
+            memset(base, 16, half);
+            memset(base + half, 235, half);
+            memset(base + uvOffset, 0x80, stride * (vActive / 2));
+        } else {
+            uint32_t *px = (uint32_t *)buf->cpuAddr;
+            for (uint32_t i = 0; i < fbBytes / 4; i++) px[i] = 0x000000FF;  /* solid blue */
+        }
+    }
     clflushRange(buf->cpuAddr, fbBytes);
 
     const uint32_t planeBase = PLANE_A_BASE;
@@ -2836,14 +3002,38 @@ bool MyIntelGPU::programPlane(MyIntelGEMBuffer *buf)
     /* Snapshot the previous plane state so restorePlane() can put the
      * scanout back when this buffer is destroyed (a client exiting must not
      * leave the plane pointing at freed GGTT — that blacks out the panel). */
-    buf->planeSavedCtl   = readReg32(planeBase + PLANE_CTL_OFFSET);
+    buf->planeSavedCtl    = readReg32(planeBase + PLANE_CTL_OFFSET);
     buf->planeSavedStride = readReg32(planeBase + PLANE_STRIDE_OFFSET);
     buf->planeSavedSize   = readReg32(planeBase + PLANE_SIZE_OFFSET);
     buf->planeSavedSurf   = readReg32(planeBase + PLANE_SURF_OFFSET);
 
     uint32_t ctl = buf->planeSavedCtl;
-    ctl |= PLANE_CTL_ENABLE;
-    writeReg32(planeBase + PLANE_CTL_OFFSET, ctl);
+
+    if (fPlaneNV12) {
+        /* NV12 state lives in PLANE_COLOR_CTL (Gen12 moved YUV CSC out of
+         * PLANE_CTL) + the four plane-offset registers; both dormant for XRGB. */
+        buf->planeSavedColorCtl  = readReg32(planeBase + PLANE_COLOR_CTL_OFFSET);
+        buf->planeSavedOffset    = readReg32(planeBase + PLANE_OFFSET_OFFSET);
+        buf->planeSavedAuxDist   = readReg32(planeBase + PLANE_AUX_DIST_OFFSET);
+        buf->planeSavedAuxOffset = readReg32(planeBase + PLANE_AUX_OFFSET_OFFSET);
+        buf->planeIsNV12 = true;
+
+        uint32_t colorCtl = buf->planeSavedColorCtl & ~PLANE_COLOR_CSC_MODE_MASK;
+        colorCtl |= PLANE_COLOR_CSC_MODE_YUV709_TO_RGB709 |
+                    PLANE_COLOR_PLANE_GAMMA_DISABLE |
+                    PLANE_COLOR_YUV_RANGE_CORRECTION_DISABLE;
+        writeReg32(planeBase + PLANE_COLOR_CTL_OFFSET, colorCtl);
+        writeReg32(planeBase + PLANE_OFFSET_OFFSET, 0);
+        writeReg32(planeBase + PLANE_AUX_OFFSET_OFFSET, 0);
+        writeReg32(planeBase + PLANE_AUX_DIST_OFFSET, uvOffset);
+
+        /* Clear the XRGB format/modifier selectors, then set NV12 (linear). */
+        ctl &= ~(PLANE_CTL_FORMAT_MASK | PLANE_CTL_TILED_MASK);
+        ctl |= PLANE_CTL_FORMAT_NV12;
+    } else {
+        ctl |= PLANE_CTL_ENABLE;
+        writeReg32(planeBase + PLANE_CTL_OFFSET, ctl);
+    }
 
     /* PLANE_STRIDE is a 12-bit field in 64-byte units (i915 skl_program_plane:
      * intel_de_write(PLANE_STRIDE, stride / 64)). Writing raw bytes (7680)
@@ -2852,6 +3042,11 @@ bool MyIntelGPU::programPlane(MyIntelGEMBuffer *buf)
     writeReg32(planeBase + PLANE_STRIDE_OFFSET, stride / 64);
     writeReg32(planeBase + PLANE_SIZE_OFFSET, ((vActive - 1) << 16) | (hActive - 1));
     writeReg32(planeBase + PLANE_SURF_OFFSET, buf->ggttOffset);
+    if (fPlaneNV12) {
+        /* i915 programs PLANE_CTL last (skl_program_plane): enable only once
+         * geometry + color registers are in place. */
+        writeReg32(planeBase + PLANE_CTL_OFFSET, ctl | PLANE_CTL_ENABLE);
+    }
 
     uint32_t live = 0;
     bool latched = false;
@@ -2874,11 +3069,11 @@ bool MyIntelGPU::programPlane(MyIntelGEMBuffer *buf)
 
     if (latched) {
         /* Success Path: Hardware fully committed the surface allocation */
-        IODebug("MyIntelGPU: [programPlane] Page flip LATCHED successfully at GGTT=0x%08X (loops=%d)",
+        IODebug("[programPlane] flip LATCHED ggtt=%X loops=%d",
                 buf->ggttOffset, loops_run);
     } else {
         /* Safety Path: Fallback graceful commit log as per driver original design */
-        IODebug("MyIntelGPU: [programPlane] Page flip NOT-LATCHED within 17ms window (stale live=0x%08X)", live);
+        IODebug("[programPlane] flip NOT-latched (live=%X)", live);
     }
 
     /* We wrote the plane registers, so we MUST restore them when the buffer
@@ -2915,6 +3110,13 @@ void MyIntelGPU::restorePlane(MyIntelGEMBuffer *buf)
     writeReg32(planeBase + PLANE_STRIDE_OFFSET, buf->planeSavedStride);
     writeReg32(planeBase + PLANE_SIZE_OFFSET,   buf->planeSavedSize);
     writeReg32(planeBase + PLANE_SURF_OFFSET,   buf->planeSavedSurf);
+    if (buf->planeIsNV12) {
+        writeReg32(planeBase + PLANE_OFFSET_OFFSET,     buf->planeSavedOffset);
+        writeReg32(planeBase + PLANE_AUX_DIST_OFFSET,   buf->planeSavedAuxDist);
+        writeReg32(planeBase + PLANE_AUX_OFFSET_OFFSET, buf->planeSavedAuxOffset);
+        writeReg32(planeBase + PLANE_COLOR_CTL_OFFSET,  buf->planeSavedColorCtl);
+        buf->planeIsNV12 = false;
+    }
     writeReg32(planeBase + PLANE_CTL_OFFSET,    buf->planeSavedCtl);
     for (int i = 0; i < 20; i++) {
         IODelay(10);
@@ -2923,7 +3125,7 @@ void MyIntelGPU::restorePlane(MyIntelGEMBuffer *buf)
     }
     buf->planeBound = false;
     buf->state &= ~GEM_STATE_SCANOUT;   /* unbind/destroy now allowed */
-    IODebug("restorePlane: plane 1A restored to CTL=0x%08X SURF=0x%08X SURFLIVE=0x%08X",
+    IODebug("restorePlane: 1A CTL=%X SURF=%X LIVE=%X",
             buf->planeSavedCtl, buf->planeSavedSurf, live);
 }
 
@@ -2942,14 +3144,16 @@ bool MyIntelGPU::initDisplay(void)
      */
     uint32_t initArg = 0;
     if (!PE_parse_boot_argn("myintelfbinit", &initArg, sizeof(initArg)) || initArg == 0) {
-        IODebug("=== Display Init SKIPPED (myintelfbinit absent) — BIOS pipeline untouched ===");
+        IODebug("=== Display Init SKIPPED ===");
         return true;
     }
 
     IODebug("=== Display Init Start ===");
     bool ok = true;
+    if (!enableDisplayPowerWells()) { IODebug("Power wells PARTIAL"); ok = false; }
     if (!initCDCLK())    { IODebug("CDCLK init FAILED");    ok = false; }
     if (!initDPLL())     { IODebug("DPLL init FAILED");     ok = false; }
+    if (!initDDI())      { IODebug("DDI init FAILED");      ok = false; }
     if (!panelPowerOn()) { IODebug("Panel power FAILED");   ok = false; }
     if (!initBacklight()){ IODebug("Backlight init FAILED");ok = false; }
     dumpDisplayStatus();
@@ -3206,7 +3410,7 @@ bool MyIntelGPU::initHardwareAcceleration(void)
         &MyIntelGPU::ggttInvalidateTrampoline, this);
 
     if (!fGemRingRCS) {
-        IODebug("HW Accel: WARNING — RCS ring GEM alloc failed, continuing");
+        IODebug("HW Accel: RCS ring GEM alloc failed");
         goto cleanup_callbacks;
     }
 
@@ -3227,7 +3431,7 @@ bool MyIntelGPU::initHardwareAcceleration(void)
         uint32_t gucStatus   = readReg32(GUC_STATUS_REG);
         uint32_t wopcmSize   = readReg32(GUC_WOPCM_SIZE_REG);
         uint32_t wopcmOffset = readReg32(DMA_GUC_WOPCM_OFFSET_REG);
-        IODebug("HW Accel: pre-ring GUC_STATUS=0x%08X (MIA_reset=%d bootrom=0x%X ukernel=0x%X mia=0x%X auth=%d)",
+        IODebug("HW Accel: GUC_STATUS=%X MIA=%d rom=%X uk=%X mia=%X auth=%d",
                 gucStatus,
                 (gucStatus & GS_MIA_IN_RESET) != 0,
                 (gucStatus & GS_BOOTROM_MASK) >> GS_BOOTROM_SHIFT,
@@ -3261,7 +3465,7 @@ bool MyIntelGPU::initHardwareAcceleration(void)
 
     IODebug("HW Accel: RCS ring created OK (ggttOffset=0x%X, vaddr=%p)",
             fRingRCS->ggttOffset, fRingRCS->vaddr);
-    IOLog("MyIntelGPU: RCS CREATE OK ggtt=0x%X vaddr=%p RING_CTL=0x%X SQ_CONTENTS=0x%X\n",
+    IOLog("RCS CREATE OK ggtt=%X va=%p CTL=%X SQ=%X\n",
           fRingRCS->ggttOffset, fRingRCS->vaddr,
           fRingRCS->mmioBase + 0x3C, fRingRCS->mmioBase + 0x510);
     setProperty("RCS-Status", "CREATE OK");
@@ -3283,7 +3487,7 @@ bool MyIntelGPU::initHardwareAcceleration(void)
         &MyIntelGPU::ggttInvalidateTrampoline, this);
 
     if (!fGemRingBCS) {
-        IODebug("HW Accel: WARNING — BCS ring GEM alloc failed, continuing without BCS");
+        IODebug("HW Accel: BCS ring GEM alloc failed");
         goto skip_bcs;
     }
 
@@ -3301,7 +3505,7 @@ bool MyIntelGPU::initHardwareAcceleration(void)
         fRingCallbacks);
 
     if (!fRingBCS) {
-        IODebug("HW Accel: WARNING — BCS ring init failed, continuing without BCS");
+        IODebug("HW Accel: BCS ring init failed");
         goto skip_bcs;
     }
 
@@ -3325,7 +3529,7 @@ skip_bcs:
         &MyIntelGPU::ggttInvalidateTrampoline, this);
 
     if (!fGemRingVCS) {
-        IODebug("HW Accel: WARNING — VCS ring GEM alloc failed, continuing without VCS");
+        IODebug("HW Accel: VCS ring GEM alloc failed");
         goto skip_vcs;
     }
 
@@ -3343,7 +3547,7 @@ skip_bcs:
         fRingCallbacks);
 
     if (!fRingVCS) {
-        IODebug("HW Accel: WARNING — VCS ring init failed, continuing without VCS");
+        IODebug("HW Accel: VCS ring init failed");
         goto cleanup_vcs_gem;
     }
 
@@ -4372,7 +4576,7 @@ bool MyIntelGPU::start(IOService *provider)
     IODebug("Phase 5d: IOFramebuffer binding phase complete");
     mygpuProgress("start:P5d-done");
     } else {
-        IODebug("Phase 5d: SKIPPED MyIntelFramebuffer (GPU-only mode; pass -myintelfb to enable display)");
+        IODebug("Phase 5d: SKIPPED MyIntelFramebuffer (GPU-only)");
     }
 
     /*
@@ -4428,7 +4632,7 @@ bool MyIntelGPU::start(IOService *provider)
             if (vcsNub && vcsNub->init()) {
                 vcsNub->attach(this);
                 vcsNub->setName(DEC_BUFFER_VCS);
-                vcsNub->setProperty(DEC_BUFFER_IOUserClient, DEC_BUFFER_VCSClient);
+                vcsNub->setProperty("IOUserClientClass", "MyIntelVCSClient");
                 vcsNub->setProperty("IOProviderClass", "IOService");
                 vcsNub->registerService();
                 vcsNub->release();
@@ -4446,15 +4650,9 @@ bool MyIntelGPU::start(IOService *provider)
     armFlipTest();
     armBridgeMirror();
     {
-        /* DEFAULT-ON (2.0.440): arm the 45s post-boot accelerator creation
-         * unconditionally. Boot-args injected by OpenCore were NOT reaching
-         * PE_parse_boot_argn (B2/B3: myacceldefer AND myintelaccel both
-         * invisible to the kext even though kern.bootargs showed them).
-         * Pass "myacceldefer=0" to keep the accelerator off. */
-        uint32_t deferMode = 2;
-        if (PE_parse_boot_argn("myacceldefer", &deferMode, sizeof(deferMode)) && deferMode == 0)
-            deferMode = 0;
-        if (deferMode)
+        /* DEFAULT-OFF (contract 4684): opt-in -myacceldefer=1/2 */
+        uint32_t deferMode = 0;
+        if (PE_parse_boot_argn("myacceldefer", &deferMode, sizeof(deferMode)) && deferMode)
             armAccelDefer(deferMode);
     }
 
@@ -4515,7 +4713,7 @@ bool MyIntelGPU::start(IOService *provider)
             if (mbData && bytesData) {
                 setProperty("VRAM,totalMB", mbData);
                 setProperty("VRAM,memSize", bytesData);
-                IOLog("MyIntelGPU: VRAM Pool report on GPU node — %llu MB (default ON, opt-out myintelvram=0)\n",
+                IOLog("[VRAM] Pool report %llu MB\n",
                       vramPoolMB);
             }
             if (mbData)    mbData->release();
@@ -4544,8 +4742,10 @@ bool MyIntelGPU::start(IOService *provider)
      * and continue — accelerator creation can never fail start().
      */
     {
-        mygpuProgress("start:P6c-accel");
-        createAcceleratorNode(kMyIntelAccelAttachUnderGPU);
+        /* DEFAULT-OFF (contract 4684): opt-in -myintelaccel=1/2 */
+        uint32_t accelMode = 0;
+        if (PE_parse_boot_argn("myintelaccel", &accelMode, sizeof(accelMode)) && accelMode)
+            createAcceleratorNode(kMyIntelAccelAttachUnderGPU);
     }
 
     /*
@@ -4983,7 +5183,7 @@ IOReturn MyIntelGPU::newUserClient(task_t resettingTask, void * securityID,
     }
 
     *handler = client;
-    IODebug("newUserClient: MyIntelGPUClient created+started (task %p)", resettingTask);
+    IODebug("newUserClient: client started %p", resettingTask);
     return kIOReturnSuccess;
 }
 
@@ -5044,7 +5244,7 @@ void MyIntelGPU::armEngineInterrupts(void)
 
     /* Arm if explicitly requested via boot-arg OR if display framebuffer is present */
     if (!gEnableGtInterrupts && !fDisplayFramebuffer) {
-        IODebug("armEngineInterrupts: SKIPPED (boot-arg -myintelgtirq not set and no display FB)");
+        IODebug("armEngineInterrupts: SKIPPED (no -myintelgtirq)");
         return;
     }
 
@@ -5106,7 +5306,7 @@ void MyIntelGPU::armEngineInterrupts(void)
     writeReg32(GEN11_GFX_MSTR_IRQ, GEN11_MASTER_IRQ);
     readReg32(GEN11_GFX_MSTR_IRQ); /* posting read */
 
-    IODebug("armEngineInterrupts: Gen11 Unified Master interrupts ARMED (smask=0x%08X dmask=0x%08X)",
+    IODebug("armEngineInterrupts: armed smask=%X dmask=%X",
             GEN11_GT_SMASK, GEN11_GT_DMASK);
 
     /*
@@ -5276,7 +5476,7 @@ void MyIntelGPU::processEngineInterrupt(uint32_t bank)
                 uint32_t engineInst  = (ident & GEN11_INTR_ENGINE_INSTANCE_MASK) >> 20;
                 uint32_t engineIntr  = ident & GEN11_INTR_ENGINE_INTR_MASK;
 
-                IODebug("processEngineInterrupt: bank=%u bit=%u identity=0x%08X (class=%u inst=%u intr=0x%04X)",
+                IODebug("processEngineInterrupt: bank=%u bit=%u id=%X cls=%u inst=%u intr=%X",
                         bank, bit, ident, engineClass, engineInst, engineIntr);
 
                 /* RCS0 = render class 0, instance 0 → USER = ring completion
@@ -5519,7 +5719,7 @@ static MyIntelGEMBuffer *allocAndBuildBatchBuffer(MyIntelGPU *self, MyIntelRing 
         cmd[14] = 0x00000000;
         cmd[15] = 0x00000000;
         dwCount = 16;
-        IODebug("allocAndBuildBatchBuffer: WriteMagic storeAddr=0x%X regAddr=0x%X clientGgtt=0x%X",
+        IODebug("allocAndBuildBatchBuffer: magic store=%X reg=%X cli=%X",
                 storeAddr, regAddr, clientGgttOffset);
         break;
     }
@@ -5617,7 +5817,7 @@ kern_return_t MyIntelGPU::submitClientTaskViaRing(uint32_t taskType,
 
     MyIntelRing *ring = (taskType == kMyIntelTaskTypeBcsBlit) ? fRingBCS : fRingRCS;
     if (!ring || !ringIsInitialized(ring)) {
-        IODebug("submitClientTaskViaRing: SKIP (ring not initialized, taskType=%u)", taskType);
+        IODebug("submitClientTask: SKIP ring init (type=%u)", taskType);
         return kIOReturnNotReady;
     }
     if (taskType >= kMyIntelTaskTypeCount) {
@@ -5626,7 +5826,7 @@ kern_return_t MyIntelGPU::submitClientTaskViaRing(uint32_t taskType,
     }
     IOLock *lock = getEngineLock();
     if (!lock) {
-        IODebug("submitClientTaskViaRing: SKIP (engine lock not allocated)");
+        IODebug("submitClientTask: SKIP no lock");
         return kIOReturnNotReady;
     }
 
@@ -5635,7 +5835,7 @@ kern_return_t MyIntelGPU::submitClientTaskViaRing(uint32_t taskType,
                                                       *(uint64_t *)fApertureVA, fGttTotal,
                                                       0);
     if (!buf) {
-        IODebug("submitClientTaskViaRing: allocAndBuildBatchBuffer failed (taskType=%u)", taskType);
+        IODebug("submitClientTask: build batch failed (type=%u)", taskType);
         return kIOReturnError;
     }
 
@@ -5645,13 +5845,13 @@ kern_return_t MyIntelGPU::submitClientTaskViaRing(uint32_t taskType,
     IOLockLock(lock);
     if (ring->pendingCount >= RING_PENDING_MAX) {
         IOLockUnlock(lock);
-        IODebug("submitClientTaskViaRing: queue FULL (%u) — client must retry", RING_PENDING_MAX);
+        IODebug("submitClientTask: queue FULL (%u)", RING_PENDING_MAX);
         gemBufferDestroy(buf, (uint32_t *)fGsm, &MyIntelGPU::ggttInvalidateTrampoline, this);
         return kIOReturnBusy;
     }
     if (!lrcMapBatchPages(ring, buf->ggttOffset, buf->pagesPhys, buf->pages)) {
         IOLockUnlock(lock);
-        IODebug("submitClientTaskViaRing: lrcMapBatchPages FAILED (ggtt=0x%X pages=%u)",
+        IODebug("submitClientTask: lrcMap FAILED ggtt=%X pages=%u",
                 buf->ggttOffset, buf->pages);
         gemBufferDestroy(buf, (uint32_t *)fGsm, &MyIntelGPU::ggttInvalidateTrampoline, this);
         return kIOReturnError;
@@ -5673,7 +5873,7 @@ kern_return_t MyIntelGPU::submitClientTaskViaRing(uint32_t taskType,
         kickCommandSet2();
     }
 
-    IODebug("submitClientTaskViaRing: queued taskType=%u seqno=%u ggtt=0x%X",
+    IODebug("submitClientTask: queued type=%u seq=%u ggtt=%X",
             taskType, seqno, buf->ggttOffset);
     return kIOReturnSuccess;
 }
@@ -5689,26 +5889,26 @@ kern_return_t MyIntelGPU::submitClientTaskViaRing(void *batchBuffer,
     }
     MyIntelRing *ring = (taskType == kMyIntelTaskTypeBcsBlit) ? fRingBCS : fRingRCS;
     if (!ring || !ringIsInitialized(ring)) {
-        IODebug("submitClientTaskViaRing(legacy): SKIP (ring not initialized, taskType=%u)", taskType);
+        IODebug("submitClientTask(legacy): SKIP ring init (type=%u)", taskType);
         return kIOReturnNotReady;
     }
     if (taskType >= kMyIntelTaskTypeCount) {
-        IODebug("submitClientTaskViaRing(legacy): SKIP (invalid taskType=%u)", taskType);
+        IODebug("submitClientTask(legacy): SKIP bad type=%u", taskType);
         return kIOReturnBadArgument;
     }
     IOLock *lock = getEngineLock();
     if (!lock) {
-        IODebug("submitClientTaskViaRing(legacy): SKIP (engine lock not allocated)");
+        IODebug("submitClientTask(legacy): SKIP no lock");
         return kIOReturnNotReady;
     }
 
     MyIntelGEMBuffer *clientBuf = (MyIntelGEMBuffer *)batchBuffer;
     if (!clientBuf || clientBuf->magic != GEM_BUFFER_MAGIC) {
-        IODebug("submitClientTaskViaRing(legacy): SKIP (invalid batch buffer)");
+        IODebug("submitClientTask(legacy): SKIP bad batch");
         return kIOReturnBadArgument;
     }
     if (clientBuf->pages == 0 || clientBuf->pagesPhys == NULL) {
-        IODebug("submitClientTaskViaRing(legacy): SKIP (batch has no physical backing)");
+        IODebug("submitClientTask(legacy): SKIP no phys backing");
         return kIOReturnNotReady;
     }
 
@@ -5717,7 +5917,7 @@ kern_return_t MyIntelGPU::submitClientTaskViaRing(void *batchBuffer,
                                                          *(uint64_t *)fApertureVA, fGttTotal,
                                                          clientBuf->ggttOffset);
     if (!cmdBuf) {
-        IODebug("submitClientTaskViaRing(legacy): allocAndBuildBatchBuffer failed (taskType=%u)", taskType);
+        IODebug("submitClientTask(legacy): build batch failed (type=%u)", taskType);
         return kIOReturnError;
     }
 
@@ -5727,13 +5927,13 @@ kern_return_t MyIntelGPU::submitClientTaskViaRing(void *batchBuffer,
     IOLockLock(lock);
     if (ring->pendingCount >= RING_PENDING_MAX) {
         IOLockUnlock(lock);
-        IODebug("submitClientTaskViaRing(legacy): queue FULL (%u) — client must retry", RING_PENDING_MAX);
+        IODebug("submitClientTask(legacy): queue FULL (%u)", RING_PENDING_MAX);
         gemBufferDestroy(cmdBuf, (uint32_t *)fGsm, &MyIntelGPU::ggttInvalidateTrampoline, this);
         return kIOReturnBusy;
     }
     if (!lrcMapBatchPages(ring, cmdBuf->ggttOffset, cmdBuf->pagesPhys, cmdBuf->pages)) {
         IOLockUnlock(lock);
-        IODebug("submitClientTaskViaRing(legacy): lrcMapBatchPages FAILED (ggtt=0x%X pages=%u)",
+        IODebug("submitClientTask(legacy): lrcMap FAILED ggtt=%X pages=%u",
                 cmdBuf->ggttOffset, cmdBuf->pages);
         gemBufferDestroy(cmdBuf, (uint32_t *)fGsm, &MyIntelGPU::ggttInvalidateTrampoline, this);
         return kIOReturnError;
@@ -5744,12 +5944,12 @@ kern_return_t MyIntelGPU::submitClientTaskViaRing(void *batchBuffer,
      * no PTE and the write was silently dropped. Map it into the same PPGTT. */
     if (!lrcMapBatchPages(ring, clientBuf->ggttOffset, clientBuf->pagesPhys, clientBuf->pages)) {
         IOLockUnlock(lock);
-        IODebug("submitClientTaskViaRing(legacy): clientBuf PPGTT map FAILED (ggtt=0x%X pages=%u) — magic will not be visible",
+        IODebug("submitClientTask(legacy): PPGTT map FAILED ggtt=%X pages=%u",
                 clientBuf->ggttOffset, clientBuf->pages);
         gemBufferDestroy(cmdBuf, (uint32_t *)fGsm, &MyIntelGPU::ggttInvalidateTrampoline, this);
         return kIOReturnError;
     }
-    IODebug("submitClientTaskViaRing(legacy): clientBuf mapped into PPGTT identity (ggtt=0x%X pages=%u)",
+    IODebug("submitClientTask(legacy): mapped PPGTT ggtt=%X pages=%u",
             clientBuf->ggttOffset, clientBuf->pages);
 
     registerInFlightBatch(cmdBuf, seqno);
@@ -5768,7 +5968,7 @@ kern_return_t MyIntelGPU::submitClientTaskViaRing(void *batchBuffer,
         kickCommandSet2();
     }
 
-    IODebug("submitClientTaskViaRing(legacy): queued taskType=%u seqno=%u cmdGgtt=0x%X clientGgtt=0x%X",
+    IODebug("submitClientTask(legacy): queued type=%u seq=%u cmd=%X cli=%X",
             taskType, seqno, cmdBuf->ggttOffset, clientBuf->ggttOffset);
     return kIOReturnSuccess;
 }
@@ -5825,7 +6025,7 @@ bool MyIntelGPU::safeInitInterrupts(void)
         /* 2.0.227: no second armEngineInterrupts() call here — the call
          * above already ran the enable chain (or skipped it via boot-arg
          * gate). A redundant call was the 4065+4078 double-arm. */
-        IODebug("safeInitInterrupts: GPU-only mode (no IntelFramebuffer) — engine interrupts");
+        IODebug("safeInitInterrupts: GPU-only mode");
         return fInterruptsArmed;
     }
 

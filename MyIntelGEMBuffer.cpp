@@ -129,7 +129,7 @@ MyIntelGEMBuffer *gemBufferCreate(
 
     /* CPU-side mapping: already via cpuAddr from IOMallocAligned */
 
-    GEM_DEBUG("gemBufferCreate: OK — size=%u pages=%u cpuAddr=%p physAddr=0x%llX ggttOffset=0x%X state=0x%X",
+    GEM_DEBUG("gemBufferCreate: OK size=%u pages=%u cpu=%p phys=%llX ggtt=%X state=%X",
               buf->size, buf->pages, buf->cpuAddr, buf->physAddr, buf->ggttOffset, buf->state);
 
     return buf;
@@ -281,6 +281,86 @@ void gemBufferUnbindFromGGTT(
     buf->ggttOffset = 0;
 }
 
+/*
+ * ─────────────────────────────────────────────
+ *  External (non-GEM) GGTT binding
+ * ─────────────────────────────────────────────
+ *  Same PTE-write + barrier + invalidate sequence as gemBufferBindToGGTT,
+ *  but for caller-owned physical pages. Allocates/frees NO pages and touches
+ *  no MyIntelGEMBuffer. Used to give userspace-owned memory a GGTT address.
+ */
+uint32_t ggttBindExternalPages(
+    const uint64_t    *pagesPhys,
+    uint32_t           pageCount,
+    uint32_t          *gsmPtr,
+    uint32_t           gttTotal,
+    GGTTInvalidateFunc invalidateFn,
+    void              *invalidateCtx)
+{
+    if (!gsmPtr || !pagesPhys || gttTotal == 0 || pageCount == 0) {
+        return 0;
+    }
+
+    uint32_t pageIdx = gemBufferFindFreeRegion(gsmPtr, gttTotal, pageCount);
+    if (pageIdx == 0) {
+        GEM_DEBUG("ERROR: ggttBindExternalPages: no free GGTT region (%u pages)",
+                  pageCount);
+        return 0;
+    }
+
+    const uint32_t ggttOffset = pageIdx * GEM_PAGE_SIZE;
+    const uint32_t seq = ++gGgttSeq;
+
+    volatile uint64_t *gsm64 = (volatile uint64_t *)gsmPtr;
+    for (uint32_t i = 0; i < pageCount; i++) {
+        gsm64[pageIdx + i] = gemBufferMakePTE(pagesPhys[i], GEM_PTE_SYSTEM_DEFAULT);
+    }
+
+    /* One barrier for the whole batch */
+    OSSynchronizeIO();
+
+    GEM_DEBUG("[GGTT] seq=%u bind ggtt=0x%X pages=%u",
+              seq, ggttOffset, pageCount);
+
+    if (invalidateFn) {
+        GEM_DEBUG("[GGTT] seq=%u bind invalidate...", seq);
+        invalidateFn(invalidateCtx);
+        GEM_DEBUG("[GGTT] seq=%u bind complete — MAPPED", seq);
+    } else {
+        GEM_DEBUG("WARNING: bind without invalidateFn — stale TLB risk (ggtt=0x%X)",
+                  ggttOffset);
+    }
+
+    return ggttOffset;
+}
+
+bool ggttUnbindExternalPages(
+    uint32_t           ggttOffset,
+    uint32_t           pageCount,
+    uint32_t          *gsmPtr,
+    GGTTInvalidateFunc invalidateFn,
+    void              *invalidateCtx)
+{
+    if (!gsmPtr || ggttOffset == 0 || pageCount == 0) {
+        return false;
+    }
+
+    const uint32_t startPage = ggttOffset >> GEM_PAGE_SHIFT;
+    gemBufferClearPTEs(gsmPtr, startPage, pageCount);
+
+    const uint32_t seq = ++gGgttSeq;
+    if (invalidateFn) {
+        GEM_DEBUG("[GGTT] seq=%u extern-unbind invalidate...", seq);
+        invalidateFn(invalidateCtx);
+        GEM_DEBUG("[GGTT] seq=%u extern-unbind complete — unmapped", seq);
+    } else {
+        GEM_DEBUG("WARNING: extern-unbind without invalidateFn — stale TLB risk (ggtt=0x%X)",
+                  ggttOffset);
+    }
+
+    return true;
+}
+
 /* 🚨 แก้ปมส้นตีน: อัปเกรดตัวล้างแคช (TLB Invalidate) ให้รองรับสถาปัตยกรรม Gen 12 อ้างอิงตาม Linux XE driver */
 void gemBufferGGTTInvalidate(
     WriteReg32Func writeReg32Func,
@@ -331,7 +411,7 @@ uint32_t gemBufferFindFreeRegion(
         }
     }
 
-    GEM_DEBUG("WARNING: no free GGTT region found (searched %u entries, need %u pages)",
+    GEM_DEBUG("WARNING: no free GGTT region (%u entries, need %u)",
               maxPages, pages);
     return 0;
 }

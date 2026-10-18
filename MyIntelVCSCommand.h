@@ -37,7 +37,7 @@ bool vcsCmdBatchEnd(MyIntelVCSCmdBuf *buf);
 
 bool vcsCmdMfxPipeModeSelect(MyIntelVCSCmdBuf *buf, uint32_t codec, bool decode);
 bool vcsCmdMfxSurfaceState(MyIntelVCSCmdBuf *buf, uint32_t width, uint32_t height,
-                           uint32_t format, uint32_t ggttOffset);
+                            uint32_t format, uint32_t ggttOffset, bool linear);
 bool vcsCmdMfxPipeBufAddrState(MyIntelVCSCmdBuf *buf, uint32_t surfaces[8], uint32_t count);
 bool vcsCmdMfxIndObjBaseAddrState(MyIntelVCSCmdBuf *buf, uint32_t ggttOffset, uint32_t size);
 bool vcsCmdMfxPicState(MyIntelVCSCmdBuf *buf, uint32_t width, uint32_t height,
@@ -52,7 +52,7 @@ bool vcsCmdMfxRefIdxState(MyIntelVCSCmdBuf *buf, uint32_t frameNum, uint32_t pic
 
 bool vcsCmdHcpPipeModeSelect(MyIntelVCSCmdBuf *buf, bool decode, uint32_t codec);
 bool vcsCmdHcpSurfaceState(MyIntelVCSCmdBuf *buf, uint32_t width, uint32_t height,
-                           uint32_t format, uint32_t ggttOffset);
+                            uint32_t format, uint32_t ggttOffset, bool linear);
 bool vcsCmdHcpPipeBufAddrState(MyIntelVCSCmdBuf *buf, uint32_t surfaces[8], uint32_t count);
 bool vcsCmdHcpIndObjBaseAddrState(MyIntelVCSCmdBuf *buf, uint32_t ggttOffset, uint32_t size);
 bool vcsCmdHcpPicState(MyIntelVCSCmdBuf *buf, uint32_t width, uint32_t height,
@@ -116,7 +116,8 @@ bool vcsCmdG12AvcImgState(MyIntelVCSCmdBuf *buf,
                            uint32_t deltaPocAlwaysZero,
                            int32_t  picInitQp, uint32_t frameNum,
                            uint32_t numRefFrames, uint32_t numRefL0Active,
-                           uint32_t numRefL1Active, uint32_t deblockCtrlPresent);
+                           uint32_t numRefL1Active, uint32_t deblockCtrlPresent,
+                           int32_t  chromaQpIndexOffset, int32_t  secondChromaQpIndexOffset);
 bool vcsCmdG12AvcPicIdState(MyIntelVCSCmdBuf *buf);
 bool vcsCmdG12AvcRefIdxDummy(MyIntelVCSCmdBuf *buf);
 bool vcsCmdG12AvcSliceState(MyIntelVCSCmdBuf *buf, uint32_t sliceType,

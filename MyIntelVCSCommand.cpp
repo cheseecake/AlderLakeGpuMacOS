@@ -58,7 +58,7 @@ bool vcsCmdMfxPipeModeSelect(MyIntelVCSCmdBuf *buf, uint32_t codec, bool decode)
 #define MFX_SURFACE_STATE_CMD       0x68000005
 
 bool vcsCmdMfxSurfaceState(MyIntelVCSCmdBuf *buf, uint32_t width, uint32_t height,
-                           uint32_t format, uint32_t ggttOffset)
+                            uint32_t format, uint32_t ggttOffset, bool linear)
 {
     uint32_t dwords[4] = {0};
     dwords[0] = MFX_SURFACE_STATE_CMD;
@@ -69,7 +69,7 @@ bool vcsCmdMfxSurfaceState(MyIntelVCSCmdBuf *buf, uint32_t width, uint32_t heigh
     /* DWORD 2: Surface format (NV12=1, P010=3) + tiling (linear=0, tileY=4) */
     uint32_t hwFormat = 1; /* NV12 default */
     if (format == 0x01) hwFormat = 3;  /* P010 */
-    dwords[2] = (hwFormat & 0xF) | (4 << 16); /* tileY mode for Gen12 */
+    dwords[2] = (hwFormat & 0xF) | ((linear ? 0 : 4) << 16); /* linear=0, tileY=4 */
 
     /* DWORD 3: Pitch = width * bpp (for NV12: width) */
     dwords[3] = width;
@@ -226,7 +226,7 @@ bool vcsCmdHcpPipeModeSelect(MyIntelVCSCmdBuf *buf, bool decode, uint32_t codec)
 #define HCP_SURFACE_STATE_CMD       0x68008005
 
 bool vcsCmdHcpSurfaceState(MyIntelVCSCmdBuf *buf, uint32_t width, uint32_t height,
-                           uint32_t format, uint32_t ggttOffset)
+                            uint32_t format, uint32_t ggttOffset, bool linear)
 {
     uint32_t dwords[4] = {0};
     dwords[0] = HCP_SURFACE_STATE_CMD;
@@ -234,7 +234,7 @@ bool vcsCmdHcpSurfaceState(MyIntelVCSCmdBuf *buf, uint32_t width, uint32_t heigh
 
     uint32_t hwFormat = 1;
     if (format == 0x01) hwFormat = 3;
-    dwords[2] = (hwFormat & 0xF) | (4 << 16);
+    dwords[2] = (hwFormat & 0xF) | ((linear ? 0 : 4) << 16); /* linear=0, tileY=4 */
 
     dwords[3] = width;
 
@@ -623,9 +623,10 @@ bool vcsCmdG12AvcImgState(MyIntelVCSCmdBuf *buf,
                           uint32_t log2MaxFrameNumM4, uint32_t pocType,
                           uint32_t log2MaxPocLsbM4, uint32_t picOrderPresent,
                           uint32_t deltaPocAlwaysZero,
-                          int32_t  picInitQp, uint32_t frameNum,
-                          uint32_t numRefFrames, uint32_t numRefL0Active,
-                          uint32_t numRefL1Active, uint32_t deblockCtrlPresent)
+                           int32_t  picInitQp, uint32_t frameNum,
+                           uint32_t numRefFrames, uint32_t numRefL0Active,
+                           uint32_t numRefL1Active, uint32_t deblockCtrlPresent,
+                           int32_t  chromaQpIndexOffset, int32_t  secondChromaQpIndexOffset)
 {
     /* 21 dwords */
     uint32_t d[21];
@@ -633,6 +634,10 @@ bool vcsCmdG12AvcImgState(MyIntelVCSCmdBuf *buf,
     d[0] = 0x71000013;   /* len=19 → 21 dwords total */
     d[1] = (widthMb * heightMb) & 0xFFFF;                 /* FrameSize (MB) */
     d[2] = ((widthMb - 1) & 0xFF) | (((heightMb - 1) & 0xFF) << 16);
+    /* DW3 — FirstChromaQpOffset bits 16-20, SecondChromaQpOffset bits 24-28
+     * (media-driver AddMfxDecodeAvcImgCmd; DW5 bits 8-21 are reserved) */
+    d[3] = (((uint32_t)chromaQpIndexOffset & 0x1Fu) << 16) |
+           (((uint32_t)secondChromaQpIndexOffset & 0x1Fu) << 24);
     d[4] = (0u << 0)                          |           /* fieldpicflag=0 */
            (0u << 1)                          |           /* mbaff */
            (1u << 2)                          |           /* framembonlyflag */
@@ -653,8 +658,12 @@ bool vcsCmdG12AvcImgState(MyIntelVCSCmdBuf *buf,
             ((log2MaxFrameNumM4 & 0xFF) << 16) |
             ((log2MaxPocLsbM4 & 0xFF) << 24);
     d[15] = (frameNum & 0xFFFF) << 16;                    /* CurrPicFrameNum */
-    /* DW5 bit27: TrellisQuantizationChromaDisable — driver sets TRUE unconditionally */
+    /* DW5 — driver sets only TrellisQuantizationChromaDisable (bit 27);
+     * DW5 bits 8-21 are reserved (chroma QP offsets live in DW3) */
     d[5] |= (1u << 27);
+    d[6] = 0;
+    /* DW7 — driver never writes DW7 for decode (VslTopMbTrans8X8Flag DISABLED) */
+    d[7] = 0;
     return vcsCmdEmitBatch(buf, d, 21);
 }
 

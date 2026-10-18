@@ -181,6 +181,29 @@ enum {
 /* PLANE_CTL bits (intel_display_reg_defs.h) */
 #define PLANE_CTL_ENABLE      (1U << 31)  /* _PLANE_CTL_ENABLE */
 
+/* NV12 multi-plane scanout registers (skl_universal_plane_regs.h, pipe A
+ * plane 1; offsets relative to PLANE_A_BASE 0x70100):
+ *   _PLANE_COLOR_CTL_1_A 0x701cc, _PLANE_OFFSET_1_A 0x701a4,
+ *   _PLANE_AUX_DIST_1_A 0x701c0, _PLANE_AUX_OFFSET_1_A 0x701c4,
+ *   _PLANE_NV12_BUF_CFG_1_A 0x70278. */
+#define PLANE_OFFSET_OFFSET      0xA4   /* PLANE_OFFSET (Y plane x/y)   */
+#define PLANE_AUX_DIST_OFFSET    0xC0   /* PLANE_AUX_DIST (UV-off − Y-off) */
+#define PLANE_AUX_OFFSET_OFFSET  0xC4   /* PLANE_AUX_OFFSET (UV plane x/y) */
+#define PLANE_COLOR_CTL_OFFSET   0xCC   /* PLANE_COLOR_CTL (GLK+)        */
+
+/* PLANE_CTL format field — Gen12 is ICL+ so the field is [27:23], but the
+ * shift-24 based NV12 value (bit23==0) maps identically. */
+#define PLANE_CTL_FORMAT_MASK   (0x1FU << 23)   /* PLANE_CTL_FORMAT_MASK_ICL */
+#define PLANE_CTL_FORMAT_NV12   (1U << 24)      /* REG_FIELD_PREP(SKL, 1) */
+#define PLANE_CTL_TILED_MASK    (7U << 10)      /* PLANE_CTL_TILED_MASK  */
+#define PLANE_CTL_TILED_Y       (4U << 10)      /* PLANE_CTL_TILED_Y     */
+
+/* PLANE_COLOR_CTL bits (skl_universal_plane_regs.h:252-265) */
+#define PLANE_COLOR_YUV_RANGE_CORRECTION_DISABLE (1U << 28)
+#define PLANE_COLOR_CSC_MODE_MASK    (7U << 17)
+#define PLANE_COLOR_CSC_MODE_YUV709_TO_RGB709 (2U << 17)
+#define PLANE_COLOR_PLANE_GAMMA_DISABLE (1U << 13)
+
 /* DDI (Digital Display Interface) */
 #define DDI_A_BASE           0x64000
 #define DDI_B_BASE           0x64100
@@ -220,6 +243,65 @@ enum {
 #define DPLL0_CFGCR0         0x164284   /* TGL: _TGL_DPLL0_CFGCR0 */
 #define DPLL0_CFGCR1         0x164288   /* TGL: _TGL_DPLL0_CFGCR1 */
 #define DPLL0_ENABLE         0x46010    /* TGL: ICL_DPLL_ENABLE(0) = _DPLL0_ENABLE */
+#define DPLL_ENABLE_BIT      (1U << 31) /* PLL enable request */
+#define DPLL_LOCK_BIT        (1U << 30) /* PLL locked status (i915 DPLL_ENABLE) */
+
+/* CDCLK PLL (Gen12) — must be enabled before CDCLK_CTL is accessible */
+#define CDCLK_PLL_ENABLE     0x46070    /* TGL: CDCLK_PLL_ENABLE */
+#define CDCLK_PLL_ENABLE_BIT (1U << 31)
+#define CDCLK_PLL_LOCK_BIT   (1U << 30)
+
+/*
+ * Display Power Wells (Gen12 TGL/ADL/RPL — i915 HSW_PWR_WELL_CTL + ICL DDI/AUX)
+ * Reference: i915 i915_reg.h (HSW_PWR_WELL_CTL1 0x45400 BIOS / CTL2 0x45404 DRIVER),
+ *   libgfxinit ADL per-pipe PW_A (idx 5: REQ bit11 / STATE bit10),
+ *   PG2/PW2 (idx 1: REQ bit3 / STATE bit2).
+ * Formula: REQ(idx) = 0x2 << (idx*2), STATE(idx) = 0x1 << (idx*2).
+ */
+#define HSW_PWR_WELL_CTL1    0x45400    /* BIOS request */
+#define HSW_PWR_WELL_CTL2    0x45404    /* DRIVER request — we program this */
+#define HSW_PWR_WELL_CTL3    0x45408
+#define HSW_PWR_WELL_CTL4    0x4540C
+#define PWR_WELL_REQ(idx)    (0x2U << ((idx) * 2))
+#define PWR_WELL_STATE(idx)  (0x1U << ((idx) * 2))
+#define PWR_WELL_IDX_PW2     1          /* PG2: REQ bit3 / STATE bit2 */
+#define PWR_WELL_IDX_PW_A    5          /* ADL/RPL per-pipe PW_A: REQ bit11 / STATE bit10 */
+#define ICL_PWR_WELL_CTL_AUX2  0x45444  /* AUX DRIVER */
+#define ICL_PWR_WELL_CTL_DDI2  0x45454  /* DDI DRIVER */
+#define PWR_WELL_IDX_DDI_A   0          /* DDI/AUX A: REQ bit1 / STATE bit0 */
+
+/*
+ * DDI Buffer Translation (Gen9 only on Intel; see note below)
+ * Reference: i915 i915_reg.h — DDI_BUF_TRANS_A 0x64E00, B 0x64E60,
+ *   LO(port,i) = base + i*8, HI = base + i*8 + 4.
+ * NOTE: old code defined DDI_BUF_TRANS_A as enum 0x00 (trans-select index),
+ * NOT an MMIO offset — writing to offset 0x00 is dropped by HW and reads
+ * back 0x00000000. Fixed here.
+ *
+ * Gen12 note (verified from local i915 source intel_ddi.c):
+ *   has_buf_trans_select() = DISPLAY_VER < 10 && !broxton.
+ *   i915 does NOT program DDI_BUF_TRANS on ICL/ADL/RPL. On Gen12 the
+ *   combo PHY swing/pre-emphasis lives in ICL_PORT_TX_DW2/4/5/7 at
+ *   combo PHY A base 0x162000 (see below). We keep this define for
+ *   read-only / same-value RMW probing only — never overwrite BIOS
+ *   PHY config with Gen9 HSW values.
+ */
+#define DDI_BUF_TRANS_A_BASE 0x64E00
+#define DDI_BUF_TRANS_B_BASE 0x64E60
+#define DDI_BUF_TRANS_LO(base, i) ((base) + (i) * 8)
+#define DDI_BUF_TRANS_HI(base, i) ((base) + (i) * 8 + 4)
+
+/*
+ * Gen12 Combo PHY A (ICL/ADL/RPL eDP on DDI A)
+ * Reference: local i915 intel_combo_phy_regs.h — _ICL_COMBOPHY_A = 0x162000
+ *   TX_DW5_GRP = base + 0x680 + 4*5  (swing/demux group)
+ *   TX_DW2_LN0 = base + 0x880 + 4*2  (lane-0 vswing/pre-emphasis)
+ * Gen12 programs signal levels here via icl_ddi_combo_vswing_program —
+ * not via DDI_BUF_TRANS (0x64E00). These are BIOS/GOP-owned; read-only probe.
+ */
+#define ICL_COMBOPHY_A_BASE   0x162000
+#define ICL_PORT_TX_DW5_GRP_A (ICL_COMBOPHY_A_BASE + 0x680 + 4*5)  /* 0x162694 */
+#define ICL_PORT_TX_DW2_LN0_A (ICL_COMBOPHY_A_BASE + 0x880 + 4*2)  /* 0x162888 */
 
 /*
  * PCH (South Display) translation
@@ -687,9 +769,11 @@ public:
      */
 
     virtual bool initDisplay(void);
+    virtual bool enableDisplayPowerWells(void);
     virtual bool panelPowerOn(void);
     virtual bool initCDCLK(void);
     virtual bool initDPLL(void);
+    virtual bool initDDI(void);
     virtual bool initBacklight(void);
     virtual bool setPanelBrightness(uint32_t brightnessPercent);
     virtual uint32_t getPanelBrightness(void);
@@ -745,8 +829,13 @@ public:
     static void sFramebufferStartTimerFired(OSObject *owner, IOTimerEventSource *sender);
 
     /* Program Pipe A plane 1 to scan out a GEM buffer (framebuffer test).
+     * If fillTestPattern=true (default), writes a test pattern (luma/UV) before scanout.
+     * If fillTestPattern=false, SKIPS the fill — assumes buffer already contains valid
+     * NV12 pixels (e.g. from VDBOX decode). Only clflush + register writes are done.
+     * hActive/vActive default to 1920/1080 for backward compatibility.
      * Returns true if PLANE_SURFLIVE latched buf->ggttOffset. */
-    virtual bool programPlane(MyIntelGEMBuffer *buf);
+    virtual bool programPlane(MyIntelGEMBuffer *buf, bool fillTestPattern = true,
+                               uint32_t hActive = 1920, uint32_t vActive = 1080);
 
     /* Restore the plane state that programPlane() overwrote, using the
      * snapshot stored in the buffer. Call before destroying a buffer that
@@ -1108,6 +1197,7 @@ private:
     MyIntelGEMBuffer        *fPlaneTestBuf;        /*!< bound test buffer (restored+freed in stop) */
     static void              sPlaneTimerFired(OSObject *owner, IOTimerEventSource *sender);
     void                     armPlaneSelfTest(void);
+    bool                     fPlaneNV12;           /*!< mynv12=1 → programPlaneNV12 path */
     /* Phase 4c-2 myflip=1 double-buffer flip test */
     IOTimerEventSource      *fFlipTimer;           /*!< recurring 500ms A<->B flips */
     MyIntelGEMBuffer        *fFlipBufs[2];         /*!< double-buffer pair (both restored+freed in stop) */
