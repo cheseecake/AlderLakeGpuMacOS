@@ -35,7 +35,7 @@
 			<key>IOPCIClassMatch</key>
 			<string>0x03000000&amp;0xff000000</string>
 			<key>IOPCIMatch</key>
-			<string>0xa7ac8086</string>
+			<string>0x46a68086 0xa7ac8086</string>
 			<key>IOProbeScore</key>
 			<integer>20000</integer>
 			<key>IOProviderClass</key>
@@ -45,11 +45,11 @@
 			rKcAAA==
 			</data>
 			<key>AutoMatch_MetalStatisticsName</key>
-			<string>Raptor Lake-U</string>
+			<string>Alder Lake-P / Raptor Lake-U</string>
 			<key>AutoMatch_MetalPlugin</key>
 			<string>MyIntelGPUMTLDriver.bundle</string>
 			<key>model</key>
-			<string>Raptor Lake-U</string>
+			<string>Alder Lake-P / Raptor Lake-U</string>
 		</dict>
 	</dict>
 	<key>MaxKernel</key>

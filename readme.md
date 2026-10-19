@@ -21,7 +21,7 @@ from `/Library/Extensions`.
 | Media engines (VDBOX / VEBOX detect via `0x138010`) | ✅ |
 | **H.264 hardware decode (VDBOX writes NV12 pixels)** | ✅ **proven** |
 | ExecBatch / WaitBatch / RingStatus client API | ✅ |
-| GPU render (Metal) | ⏳ opt-in (`myintelaccel=1`), not yet proven |
+| GPU render (Metal) | ⏳ opt-in (`myintelaccel=1/2`), not yet proven |
 
 ## Hardware decode proof
 
@@ -47,7 +47,8 @@ Golden reference dumps from Linux `i915` and the Windows Intel driver live in
 |---|---|
 | `myintelfb=1` | Let `MyIntelFramebuffer` own the real panel (EDID `2c82`/`0924`) |
 | `myinteldisplaypipe=1` | Attach the display pipe (W2-1 cross-connect path) |
-| `myintelaccel=1` | Opt-in accelerator / IOAccelerator path — **risky on Gen12** |
+| `myintelaccel=1` | Opt-in accelerator / IOAccelerator path under `MyIntelGPU` node — **risky on Gen12** |
+| `myintelaccel=2` | Opt-in accelerator under PCI device topology (Apple-style), often better for probing Metal on ADL-P/i3-1220P |
 
 > ⚠️ `myintelaccel=1` binds the `AppleIntelKBLGraphics` Metal/GL plugin against
 > Gen12 registers. Known panic vectors: `stack_chk_fail`, `IOGMD: not wired`.

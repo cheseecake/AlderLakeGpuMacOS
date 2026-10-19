@@ -4744,8 +4744,15 @@ bool MyIntelGPU::start(IOService *provider)
     {
         /* DEFAULT-OFF (contract 4684): opt-in -myintelaccel=1/2 */
         uint32_t accelMode = 0;
-        if (PE_parse_boot_argn("myintelaccel", &accelMode, sizeof(accelMode)) && accelMode)
-            createAcceleratorNode(kMyIntelAccelAttachUnderGPU);
+        if (PE_parse_boot_argn("myintelaccel", &accelMode, sizeof(accelMode)) && accelMode) {
+            if (accelMode != kMyIntelAccelAttachUnderGPU &&
+                accelMode != kMyIntelAccelAttachUnderPCI) {
+                IODebug("Phase 6c: invalid myintelaccel=%u, fallback to mode=%u",
+                        accelMode, (uint32_t)kMyIntelAccelAttachUnderGPU);
+                accelMode = kMyIntelAccelAttachUnderGPU;
+            }
+            createAcceleratorNode(accelMode);
+        }
     }
 
     /*
